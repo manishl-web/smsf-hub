@@ -96,12 +96,14 @@ if app_mode == "🔍 Search & Analytics Hub":
     m4.markdown(f'<div class="metric-box"><div class="metric-label">FY2025 Reports</div><div class="metric-value" style="color:#2563EB;">{fy25}</div></div>', unsafe_allow_html=True)
 
     st.write("")
-    fcol1, fcol2 = st.columns([3, 1])
+    fcol1, fcol2, fcol3 = st.columns([2, 1, 1])
     with fcol1:
         q = st.text_input("🔍 Keyword Search (Platform, Auditor, Exceptions)", "").strip().lower()
     with fcol2:
         fy_options = ["All Years"] + [f"FY{year}" for year in range(2021, 2031)]
         fy_sel = st.selectbox("Financial Year", fy_options)
+    with fcol3:
+        status_sel = st.selectbox("Audit Status Filter", ["All Reports", "Qualified Only", "Unqualified Only"])
 
     st.divider()
 
@@ -111,9 +113,18 @@ if app_mode == "🔍 Search & Analytics Hub":
         matches_search = (q in search_blob) if q else True
         doc_fy = str(r.get('financial_year', '')).upper()
         matches_fy = True if fy_sel == "All Years" else (fy_sel.replace("FY", "") in doc_fy)
+        
+        opinion_str = str(r.get('audit_opinion', '')).lower()
+        matches_status = True
+        if status_sel == "Qualified Only":
+            matches_status = "qualified" in opinion_str and "unqualified" not in opinion_str
+        elif status_sel == "Unqualified Only":
+            matches_status = "unqualified" in opinion_str
 
-        if matches_search and matches_fy:
+        if matches_search and matches_fy and matches_status:
             filtered.append(r)
+
+    st.markdown(f"Showing **{len(filtered)}** matching reports:")
 
     if filtered:
         for idx, r in enumerate(filtered):
@@ -148,6 +159,25 @@ elif app_mode == "📤 AI Batch Upload Studio":
     </div>
     """, unsafe_allow_html=True)
 
+    with st.expander("🚨 Database Maintenance & Purge Controls"):
+        st.warning("Use this control to wipe all database entries and clear storage if starting clean.")
+        if st.button("🗑️ Reset Database & Delete All Records"):
+            if db:
+                docs = list(db.collection('type2_reports').stream())
+                for doc in docs:
+                    doc.reference.delete()
+            if supabase:
+                try:
+                    files = supabase.storage.from_("pdfs").list("reports")
+                    file_names = [f["name"] for f in files if "name" in f]
+                    if file_names:
+                        supabase.storage.from_("pdfs").remove([f"reports/{fn}" for fn in file_names])
+                except Exception as e:
+                    st.error(f"Storage reset error: {e}")
+            st.cache_data.clear()
+            st.success("✅ Database and Storage successfully wiped! You are ready to start fresh.")
+            st.rerun()
+
     with st.form("batch_upload_form"):
         uploaded_files = st.file_uploader("Select PDF reports", type=['pdf'], accept_multiple_files=True)
         submit_btn = st.form_submit_button("⚡ Process & Index Batch")
@@ -160,7 +190,6 @@ elif app_mode == "📤 AI Batch Upload Studio":
         else:
             client = genai.Client(api_key=api_key)
             
-            # Dynamically fetch available models from the account API
             active_models = []
             try:
                 available = client.models.list()
@@ -174,21 +203,23 @@ elif app_mode == "📤 AI Batch Upload Studio":
             st.caption(f"🤖 Dynamic Model Pool Active: `{', '.join(active_models[:3])}`")
             progress = st.progress(0)
             
+            # Fetch existing records once to speed up comparison checks
+            existing_docs = [d.to_dict() for d in db.collection('type2_reports').stream()]
+            
             for idx, file in enumerate(uploaded_files):
                 st.info(f"Processing [{idx+1}/{len(uploaded_files)}]: {file.name}...")
-                raw_bytes = file.getvalue()
                 
-                # 1. Upload to Supabase Storage CDN
-                storage_path = f"reports/{file.name}"
-                try:
-                    supabase.storage.from_("pdfs").upload(storage_path, raw_bytes, {"x-upsert": "true"})
-                    download_url = supabase.storage.from_("pdfs").get_public_url(storage_path)
-                except Exception as e:
-                    st.error(f"Supabase Storage Upload Error: {e}")
+                # Check 1: Filename level pre-check
+                filename_duplicate = any(d.get("source_filename") == file.name for d in existing_docs)
+                if filename_duplicate:
+                    st.warning(f"⚠️ **Skipped**: Document with filename `{file.name}` already exists in the database.")
+                    progress.progress((idx + 1) / len(uploaded_files))
                     continue
 
-                # 2. Extract with Gemini
+                raw_bytes = file.getvalue()
                 tmp_path = None
+
+                # Extract parameters with Gemini
                 try:
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                         tmp.write(raw_bytes)
@@ -212,12 +243,10 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     res = None
                     last_err = None
                     
-                    # Cycle through dynamically fetched active models
                     for m_name in active_models:
                         try:
                             res = client.models.generate_content(model=m_name, contents=[g_file, prompt])
                             if res and res.text:
-                                st.caption(f"✓ Processed via `{m_name}`")
                                 break
                         except Exception as m_err:
                             last_err = m_err
@@ -229,7 +258,6 @@ elif app_mode == "📤 AI Batch Upload Studio":
                         st.error(f"Failed to process {file.name}. Details: {last_err}")
                         continue
                     
-                    # Clean JSON string
                     clean_text = res.text.strip()
                     clean_text = re.sub(r'^```json\s*', '', clean_text, flags=re.MULTILINE)
                     clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
@@ -238,12 +266,38 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     match = re.search(r'\{.*\}', clean_text, re.DOTALL)
                     if match:
                         metadata = json.loads(match.group(0))
+                        extracted_platform = str(metadata.get('platform_name', '')).strip().lower()
+                        extracted_fy = str(metadata.get('financial_year', '')).strip().upper()
+
+                        # Check 2: Parameters level check (Platform Name + FY combination)
+                        param_duplicate = False
+                        for doc in existing_docs:
+                            doc_plat = str(doc.get('platform_name', '')).strip().lower()
+                            doc_fy = str(doc.get('financial_year', '')).strip().upper()
+                            if doc_plat == extracted_platform and doc_fy == extracted_fy:
+                                param_duplicate = True
+                                break
+
+                        if param_duplicate:
+                            st.error(f"🚫 **Duplicate Blocked**: A report for **{metadata.get('platform_name')}** for year **{metadata.get('financial_year')}** is already registered in the system.")
+                            progress.progress((idx + 1) / len(uploaded_files))
+                            continue
+
+                        # Proceed to storage upload if unique
+                        storage_path = f"reports/{file.name}"
+                        supabase.storage.from_("pdfs").upload(storage_path, raw_bytes, {"x-upsert": "true"})
+                        download_url = supabase.storage.from_("pdfs").get_public_url(storage_path)
+
                         metadata["download_url"] = download_url
                         metadata["source_filename"] = file.name
                         
-                        doc_id = f"{metadata.get('platform_name', 'Doc').replace(' ', '_')}_{metadata.get('financial_year', 'FY25')}"
+                        platform_slug = re.sub(r'[^a-zA-Z0-9]', '_', metadata.get('platform_name', 'Doc')).strip('_')
+                        fy_slug = re.sub(r'[^a-zA-Z0-9]', '', metadata.get('financial_year', 'FY25'))
+                        doc_id = f"{platform_slug}_{fy_slug}"
+                        
                         db.collection('type2_reports').document(doc_id).set(metadata)
-                        st.success(f"✅ Extracted and Indexed: **{file.name}**")
+                        existing_docs.append(metadata)  # Append to memory list so subsequent uploads in same batch check against it
+                        st.success(f"✅ Extracted and Indexed: **{file.name}** ({metadata.get('platform_name')} - {metadata.get('financial_year')})")
                     else:
                         st.warning(f"Could not parse JSON output for {file.name}")
 
