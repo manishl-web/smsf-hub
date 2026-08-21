@@ -144,7 +144,7 @@ elif app_mode == "📤 AI Batch Upload Studio":
     st.markdown("""
     <div class="hero-banner">
         <div class="hero-title">AI Batch Processing Studio</div>
-        <div class="hero-subtitle">Parse, extract, and index GS007/SOC1 reports using Gemini AI Model Rotation & Supabase Storage</div>
+        <div class="hero-subtitle">Parse, extract, and index GS007/SOC1 reports dynamically</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -159,22 +159,26 @@ elif app_mode == "📤 AI Batch Upload Studio":
             st.error("⚠️ Database/Storage connections missing. Check configuration.")
         else:
             client = genai.Client(api_key=api_key)
-            progress = st.progress(0)
             
-            # List of model fallback options
-            MODEL_POOL = [
-                "gemini-2.5-flash",
-                "gemini-1.5-flash",
-                "gemini-2.0-flash",
-                "gemini-1.5-pro",
-                "gemini-2.5-pro"
-            ]
+            # Dynamically fetch available models from the account API
+            active_models = []
+            try:
+                available = client.models.list()
+                for m in available:
+                    m_name = m.name.replace("models/", "")
+                    if "flash" in m_name or "pro" in m_name:
+                        active_models.append(m_name)
+            except Exception:
+                active_models = ["gemini-3.6-flash", "gemini-1.5-flash"]
+
+            st.caption(f"🤖 Dynamic Model Pool Active: `{', '.join(active_models[:3])}`")
+            progress = st.progress(0)
             
             for idx, file in enumerate(uploaded_files):
                 st.info(f"Processing [{idx+1}/{len(uploaded_files)}]: {file.name}...")
                 raw_bytes = file.getvalue()
                 
-                # 1. Upload direct binary to Supabase Storage CDN
+                # 1. Upload to Supabase Storage CDN
                 storage_path = f"reports/{file.name}"
                 try:
                     supabase.storage.from_("pdfs").upload(storage_path, raw_bytes, {"x-upsert": "true"})
@@ -183,7 +187,7 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     st.error(f"Supabase Storage Upload Error: {e}")
                     continue
 
-                # 2. Extract with Gemini Model Rotation
+                # 2. Extract with Gemini
                 tmp_path = None
                 try:
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -208,25 +212,24 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     res = None
                     last_err = None
                     
-                    # Try models in rotation sequence
-                    for model_name in MODEL_POOL:
+                    # Cycle through dynamically fetched active models
+                    for m_name in active_models:
                         try:
-                            res = client.models.generate_content(model=model_name, contents=[g_file, prompt])
+                            res = client.models.generate_content(model=m_name, contents=[g_file, prompt])
                             if res and res.text:
-                                st.caption(f"✓ Processed via `{model_name}`")
+                                st.caption(f"✓ Processed via `{m_name}`")
                                 break
                         except Exception as m_err:
                             last_err = m_err
-                            # If quota exhausted, pause briefly and fall through to the next model
                             if "429" in str(m_err) or "RESOURCE_EXHAUSTED" in str(m_err):
-                                time.sleep(3)
+                                time.sleep(5)
                             continue
 
                     if not res or not res.text:
-                        st.error(f"Failed to process {file.name} across all models. Error: {last_err}")
+                        st.error(f"Failed to process {file.name}. Details: {last_err}")
                         continue
                     
-                    # Clean JSON output
+                    # Clean JSON string
                     clean_text = res.text.strip()
                     clean_text = re.sub(r'^```json\s*', '', clean_text, flags=re.MULTILINE)
                     clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
@@ -250,7 +253,6 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     if tmp_path and os.path.exists(tmp_path):
                         os.remove(tmp_path)
                 
-                # Small pause to avoid hitting global RPM limits
                 time.sleep(2)
                 progress.progress((idx + 1) / len(uploaded_files))
             
