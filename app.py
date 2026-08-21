@@ -29,6 +29,7 @@ st.markdown("""
     .metric-label { font-size: 0.8rem; font-weight: 600; color: #64748B; text-transform: uppercase; }
     .badge-unqualified { background: #DCFCE7; color: #15803D; font-size: 0.75rem; font-weight: 700; padding: 4px 12px; border-radius: 30px; border: 1px solid #86EFAC; }
     .badge-qualified { background: #FEE2E2; color: #B91C1C; font-size: 0.75rem; font-weight: 700; padding: 4px 12px; border-radius: 30px; border: 1px solid #FCA5A5; }
+    .sub-doc-pill { background: #F1F5F9; border: 1px solid #CBD5E1; border-radius: 8px; padding: 8px 12px; margin-top: 6px; font-size: 0.82rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -92,7 +93,7 @@ if app_mode == "🔍 Search & Analytics Hub":
     m2.markdown(f'<div class="metric-box"><div class="metric-label">Unqualified Reports</div><div class="metric-value" style="color:#16A34A;">{clean_opinions}</div></div>', unsafe_allow_html=True)
     exceptions = len(reports) - clean_opinions
     m3.markdown(f'<div class="metric-box"><div class="metric-label">Exceptions Flagged</div><div class="metric-value" style="color:#DC2626;">{exceptions}</div></div>', unsafe_allow_html=True)
-    fy25 = sum(1 for r in reports if '2025' in str(r.get('financial_year', '')) or '25' in str(r.get('financial_year', '')))
+    fy25 = sum(1 for r in reports if 'FY2025' in str(r.get('aus_financial_year', '')) or '2025' in str(r.get('financial_year', '')))
     m4.markdown(f'<div class="metric-box"><div class="metric-label">FY2025 Reports</div><div class="metric-value" style="color:#2563EB;">{fy25}</div></div>', unsafe_allow_html=True)
 
     st.write("")
@@ -107,11 +108,13 @@ if app_mode == "🔍 Search & Analytics Hub":
 
     st.divider()
 
+    # Filter reports
     filtered = []
     for r in reports:
         search_blob = f"{r.get('platform_name', '')} {r.get('auditing_firm', '')} {r.get('audit_opinion', '')} {r.get('key_exceptions_summary', '')}".lower()
         matches_search = (q in search_blob) if q else True
-        doc_fy = str(r.get('financial_year', '')).upper()
+        
+        doc_fy = f"{r.get('aus_financial_year', '')} {r.get('financial_year', '')}".upper()
         matches_fy = True if fy_sel == "All Years" else (fy_sel.replace("FY", "") in doc_fy)
         
         opinion_str = str(r.get('audit_opinion', '')).lower()
@@ -124,32 +127,56 @@ if app_mode == "🔍 Search & Analytics Hub":
         if matches_search and matches_fy and matches_status:
             filtered.append(r)
 
-    st.markdown(f"Showing **{len(filtered)}** matching reports:")
+    # Group reports by Platform Name and AU FY to put staggered reports under one roof
+    grouped_reports = {}
+    for r in filtered:
+        group_key = f"{r.get('platform_name', 'Unknown Platform')} - {r.get('aus_financial_year', r.get('financial_year', 'FY2025'))}"
+        if group_key not in grouped_reports:
+            grouped_reports[group_key] = []
+        grouped_reports[group_key].append(r)
 
-    if filtered:
-        for idx, r in enumerate(filtered):
-            opinion = str(r.get('audit_opinion', 'Unqualified'))
-            badge = "badge-unqualified" if "unqualified" in opinion.lower() else "badge-qualified"
-            
-            st.markdown(f"""
-            <div class="glass-card">
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <h3 style="margin:0; color:#0F172A; font-weight:700;">🏢 {r.get('platform_name', 'Unknown Platform')}</h3>
-                    <span class="{badge}">{opinion.upper()}</span>
-                </div>
-                <p style="color:#64748B; font-size:0.88rem; margin: 10px 0;">
-                    <strong>Doc Type:</strong> {r.get('document_type', 'GS007')} &nbsp;•&nbsp; 
-                    <strong>Auditor:</strong> {r.get('auditing_firm', 'N/A')} &nbsp;•&nbsp;
-                    <strong>FY:</strong> {r.get('financial_year', 'N/A')}
-                </p>
-                <div style="background:#F1F5F9; padding:12px; border-radius:10px; font-size:0.88rem; color:#334155; margin-bottom:12px;">
-                    <strong>🔍 Control Exceptions:</strong> {r.get('key_exceptions_summary', 'None flagged.')}
-                </div>
+    st.markdown(f"Showing **{len(grouped_reports)}** Compliance Packages ({len(filtered)} documents total):")
+
+    for group_key, doc_list in grouped_reports.items():
+        primary_doc = doc_list[0]
+        platform_name = primary_doc.get('platform_name', 'Unknown Platform')
+        aus_fy = primary_doc.get('aus_financial_year', primary_doc.get('financial_year', 'FY2025'))
+        
+        # Determine overall opinion
+        has_qualified = any("qualified" in str(d.get('audit_opinion', '')).lower() and "unqualified" not in str(d.get('audit_opinion', '')).lower() for d in doc_list)
+        overall_opinion = "QUALIFIED" if has_qualified else "UNQUALIFIED"
+        badge_class = "badge-qualified" if has_qualified else "badge-unqualified"
+
+        st.markdown(f"""
+        <div class="glass-card">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h3 style="margin:0; color:#0F172A; font-weight:700;">🏢 {platform_name} &nbsp;<span style="color:#2563EB; font-size:1.1rem;">({aus_fy} Compliance File)</span></h3>
+                <span class="{badge_class}">{overall_opinion}</span>
             </div>
-            """, unsafe_allow_html=True)
+            <p style="color:#64748B; font-size:0.88rem; margin: 8px 0 14px 0;">
+                <strong>Auditor:</strong> {primary_doc.get('auditing_firm', 'N/A')} &nbsp;•&nbsp; 
+                <strong>Sub-documents Attached:</strong> {len(doc_list)}
+            </p>
+        """, unsafe_allow_html=True)
+        
+        # Render each associated sub-document inside the unified card
+        for d in doc_list:
+            role_tag = f"<b>[{d.get('doc_role', 'Control Report')}]</b> " if d.get('doc_role') else ""
+            date_range = f" ({d.get('date_coverage_period', '')})" if d.get('date_coverage_period') else ""
             
-            if r.get('download_url'):
-                st.link_button(f"📥 Download {r.get('source_filename', 'Report.pdf')}", r['download_url'])
+            col_left, col_right = st.columns([4, 1])
+            with col_left:
+                st.markdown(f"""
+                <div class="sub-doc-pill">
+                    📄 {role_tag}<strong>{d.get('source_filename', 'Report.pdf')}</strong>{date_range}<br/>
+                    <span style="color:#475569;">Exceptions: {d.get('key_exceptions_summary', 'None flagged')}</span>
+                </div>
+                """, unsafe_allow_html=True)
+            with col_right:
+                if d.get('download_url'):
+                    st.link_button("📥 Download", d['download_url'])
+        
+        st.markdown("</div>", unsafe_allow_html=True)
 
 elif app_mode == "📤 AI Batch Upload Studio":
     st.markdown("""
@@ -203,13 +230,11 @@ elif app_mode == "📤 AI Batch Upload Studio":
             st.caption(f"🤖 Dynamic Model Pool Active: `{', '.join(active_models[:3])}`")
             progress = st.progress(0)
             
-            # Fetch existing records once to speed up comparison checks
             existing_docs = [d.to_dict() for d in db.collection('type2_reports').stream()]
             
             for idx, file in enumerate(uploaded_files):
                 st.info(f"Processing [{idx+1}/{len(uploaded_files)}]: {file.name}...")
                 
-                # Check 1: Filename level pre-check
                 filename_duplicate = any(d.get("source_filename") == file.name for d in existing_docs)
                 if filename_duplicate:
                     st.warning(f"⚠️ **Skipped**: Document with filename `{file.name}` already exists in the database.")
@@ -219,7 +244,6 @@ elif app_mode == "📤 AI Batch Upload Studio":
                 raw_bytes = file.getvalue()
                 tmp_path = None
 
-                # Extract parameters with Gemini
                 try:
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                         tmp.write(raw_bytes)
@@ -230,9 +254,12 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     prompt = """
                     Extract details from this audit document in raw valid JSON format:
                     {
-                        "platform_name": "Primary Platform Name",
-                        "document_type": "GS007 Report or SOC 1 Report",
-                        "financial_year": "e.g. FY2025",
+                        "platform_name": "Primary Platform Name (e.g. Interactive Brokers, BT Panorama)",
+                        "document_type": "GS007 Report, SOC 1 Report, SOC 3 Report, or Bridge Letter",
+                        "date_coverage_period": "Exact period tested, e.g., Jan 2024 - Dec 2024 or Jan 2025 - Jun 2025",
+                        "financial_year": "Original report year e.g. FY2024 or CY2024",
+                        "aus_financial_year": "Corresponding Australian Financial Year (1 July - 30 June) this document supports e.g. FY2024 or FY2025",
+                        "doc_role": "Role e.g., 'Primary SOC Report (Part 1)', 'Primary SOC Report (Part 2)', or 'Gap/Bridge Letter'",
                         "auditing_firm": "e.g. PwC, Deloitte, KPMG, EY",
                         "audit_opinion": "Unqualified or Qualified",
                         "key_exceptions_summary": "Summary of exceptions or 'None flagged'"
@@ -266,24 +293,7 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     match = re.search(r'\{.*\}', clean_text, re.DOTALL)
                     if match:
                         metadata = json.loads(match.group(0))
-                        extracted_platform = str(metadata.get('platform_name', '')).strip().lower()
-                        extracted_fy = str(metadata.get('financial_year', '')).strip().upper()
-
-                        # Check 2: Parameters level check (Platform Name + FY combination)
-                        param_duplicate = False
-                        for doc in existing_docs:
-                            doc_plat = str(doc.get('platform_name', '')).strip().lower()
-                            doc_fy = str(doc.get('financial_year', '')).strip().upper()
-                            if doc_plat == extracted_platform and doc_fy == extracted_fy:
-                                param_duplicate = True
-                                break
-
-                        if param_duplicate:
-                            st.error(f"🚫 **Duplicate Blocked**: A report for **{metadata.get('platform_name')}** for year **{metadata.get('financial_year')}** is already registered in the system.")
-                            progress.progress((idx + 1) / len(uploaded_files))
-                            continue
-
-                        # Proceed to storage upload if unique
+                        
                         storage_path = f"reports/{file.name}"
                         supabase.storage.from_("pdfs").upload(storage_path, raw_bytes, {"x-upsert": "true"})
                         download_url = supabase.storage.from_("pdfs").get_public_url(storage_path)
@@ -291,13 +301,13 @@ elif app_mode == "📤 AI Batch Upload Studio":
                         metadata["download_url"] = download_url
                         metadata["source_filename"] = file.name
                         
-                        platform_slug = re.sub(r'[^a-zA-Z0-9]', '_', metadata.get('platform_name', 'Doc')).strip('_')
-                        fy_slug = re.sub(r'[^a-zA-Z0-9]', '', metadata.get('financial_year', 'FY25'))
-                        doc_id = f"{platform_slug}_{fy_slug}"
+                        # Generate unique doc ID incorporating source filename hash to allow multiple sub-documents under same platform/FY
+                        file_slug = re.sub(r'[^a-zA-Z0-9]', '_', file.name).strip('_')
+                        doc_id = f"doc_{file_slug}"
                         
                         db.collection('type2_reports').document(doc_id).set(metadata)
-                        existing_docs.append(metadata)  # Append to memory list so subsequent uploads in same batch check against it
-                        st.success(f"✅ Extracted and Indexed: **{file.name}** ({metadata.get('platform_name')} - {metadata.get('financial_year')})")
+                        existing_docs.append(metadata)
+                        st.success(f"✅ Extracted and Indexed: **{file.name}** ({metadata.get('platform_name')} -> {metadata.get('aus_financial_year')})")
                     else:
                         st.warning(f"Could not parse JSON output for {file.name}")
 
