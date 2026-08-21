@@ -246,9 +246,28 @@ elif app_mode == "📤 AI Batch Upload Studio":
             st.success("✅ Database and Storage successfully wiped!")
             st.rerun()
 
-    with st.form("batch_upload_form"):
-        uploaded_files = st.file_uploader("Select PDF reports", type=['pdf'], accept_multiple_files=True)
-        submit_btn = st.form_submit_button("⚡ Process & Index Batch")
+    # Dynamic key management for resetting selected uploaded files
+    if "uploader_key" not in st.session_state:
+        st.session_state.uploader_key = 0
+
+    col_upload, col_reset = st.columns([5, 1])
+
+    with col_upload:
+        uploaded_files = st.file_uploader(
+            "Select PDF reports", 
+            type=['pdf'], 
+            accept_multiple_files=True,
+            key=f"pdf_uploader_{st.session_state.uploader_key}"
+        )
+
+    with col_reset:
+        st.write("")
+        st.write("")
+        if st.button("🔄 Clear Files", use_container_width=True):
+            st.session_state.uploader_key += 1
+            st.rerun()
+
+    submit_btn = st.button("⚡ Process & Index Batch", type="primary", use_container_width=True)
 
     if submit_btn and uploaded_files:
         if not api_key:
