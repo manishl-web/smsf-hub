@@ -221,24 +221,32 @@ elif app_mode == "📤 AI Batch Upload Studio":
     </div>
     """, unsafe_allow_html=True)
 
-    with st.expander("🚨 Database Maintenance & Purge Controls"):
-        st.warning("Use this control to wipe all database entries and clear storage if starting clean.")
-        if st.button("🗑️ Reset Database & Delete All Records"):
+    # ------------------ DATABASE RESET & MAINTENANCE CONTROL ------------------
+    with st.expander("🚨 Database Maintenance & Reset Options"):
+        st.warning("⚠️ Action permanently deletes indexed metadata from Firestore and clears uploaded PDF files from Supabase Storage.")
+        if st.button("🗑️ Reset Database & Delete All Records", type="primary"):
             if db:
-                docs = list(db.collection('type2_reports').stream())
-                for doc in docs:
-                    doc.reference.delete()
+                try:
+                    docs = list(db.collection('type2_reports').stream())
+                    for doc in docs:
+                        doc.reference.delete()
+                    st.info("Cleared Firestore database records.")
+                except Exception as e:
+                    st.error(f"Error purging Firestore: {e}")
             if supabase:
                 try:
                     files = supabase.storage.from_("pdfs").list("reports")
                     file_names = [f["name"] for f in files if "name" in f]
                     if file_names:
                         supabase.storage.from_("pdfs").remove([f"reports/{fn}" for fn in file_names])
+                    st.info("Cleared Supabase Storage files.")
                 except Exception as e:
-                    st.error(f"Storage reset error: {e}")
+                    st.error(f"Error purging Supabase Storage: {e}")
+            
             st.cache_data.clear()
-            st.success("✅ Database and Storage successfully wiped! You are ready to start fresh.")
+            st.success("✅ Database and Storage successfully wiped!")
             st.rerun()
+    # --------------------------------------------------------------------------
 
     with st.form("batch_upload_form"):
         uploaded_files = st.file_uploader("Select PDF reports", type=['pdf'], accept_multiple_files=True)
@@ -260,7 +268,7 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     if "flash" in m_name or "pro" in m_name:
                         active_models.append(m_name)
             except Exception:
-                active_models = ["gemini-3.6-flash", "gemini-1.5-flash"]
+                active_models = ["gemini-2.5-flash", "gemini-1.5-flash"]
 
             st.caption(f"🤖 Dynamic Model Pool Active: `{', '.join(active_models[:3])}`")
             progress = st.progress(0)
@@ -270,7 +278,7 @@ elif app_mode == "📤 AI Batch Upload Studio":
             for idx, file in enumerate(uploaded_files):
                 st.info(f"Processing [{idx+1}/{len(uploaded_files)}]: {file.name}...")
                 
-                # Check 1: Filename pre-check
+                # Pre-check: Duplicate Filename
                 filename_duplicate = any(d.get("source_filename") == file.name for d in existing_docs)
                 if filename_duplicate:
                     st.warning(f"⚠️ **Skipped**: Document `{file.name}` already exists in database.")
@@ -331,49 +339,9 @@ elif app_mode == "📤 AI Batch Upload Studio":
                         extracted_fy = str(metadata.get('aus_financial_year', metadata.get('financial_year', ''))).strip().upper()
                         extracted_role = str(metadata.get('doc_role', '')).strip().lower()
 
-                        # Check 2: Parameter-level duplicate check
+                        # Post-check: Duplicate Metadata Parameters
                         param_duplicate = False
                         for doc in existing_docs:
                             d_plat = str(doc.get('platform_name', '')).strip().lower()
                             d_fy = str(doc.get('aus_financial_year', doc.get('financial_year', ''))).strip().upper()
-                            d_role = str(doc.get('doc_role', '')).strip().lower()
-                            
-                            if d_plat == extracted_platform and d_fy == extracted_fy and d_role == extracted_role:
-                                param_duplicate = True
-                                break
-
-                        if param_duplicate:
-                            st.error(f"🚫 **Duplicate Blocked**: A {metadata.get('doc_role')} for **{metadata.get('platform_name')}** ({metadata.get('aus_financial_year')}) already exists.")
-                            progress.progress((idx + 1) / len(uploaded_files))
-                            continue
-
-                        # Clean filename for Supabase Object Key
-                        safe_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', file.name)
-                        storage_path = f"reports/{safe_filename}"
-                        
-                        supabase.storage.from_("pdfs").upload(storage_path, raw_bytes, {"x-upsert": "true"})
-                        download_url = supabase.storage.from_("pdfs").get_public_url(storage_path)
-
-                        metadata["download_url"] = download_url
-                        metadata["source_filename"] = file.name  # Retains human readable title
-                        
-                        file_slug = re.sub(r'[^a-zA-Z0-9]', '_', safe_filename).strip('_')
-                        doc_id = f"doc_{file_slug}"
-                        
-                        db.collection('type2_reports').document(doc_id).set(metadata)
-                        existing_docs.append(metadata)
-                        st.success(f"✅ Extracted and Indexed: **{file.name}** ({metadata.get('platform_name')} - {metadata.get('aus_financial_year')})")
-                    else:
-                        st.warning(f"Could not parse valid JSON output for {file.name}")
-
-                except Exception as e:
-                    st.error(f"Error processing {file.name}: {e}")
-                finally:
-                    if tmp_path and os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                
-                time.sleep(2)
-                progress.progress((idx + 1) / len(uploaded_files))
-            
-            st.cache_data.clear()
-            st.balloons()
+                            d_role =
