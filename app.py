@@ -221,7 +221,6 @@ elif app_mode == "📤 AI Batch Upload Studio":
     </div>
     """, unsafe_allow_html=True)
 
-    # ------------------ DATABASE RESET & MAINTENANCE CONTROL ------------------
     with st.expander("🚨 Database Maintenance & Reset Options"):
         st.warning("⚠️ Action permanently deletes indexed metadata from Firestore and clears uploaded PDF files from Supabase Storage.")
         if st.button("🗑️ Reset Database & Delete All Records", type="primary"):
@@ -246,7 +245,6 @@ elif app_mode == "📤 AI Batch Upload Studio":
             st.cache_data.clear()
             st.success("✅ Database and Storage successfully wiped!")
             st.rerun()
-    # --------------------------------------------------------------------------
 
     with st.form("batch_upload_form"):
         uploaded_files = st.file_uploader("Select PDF reports", type=['pdf'], accept_multiple_files=True)
@@ -344,4 +342,38 @@ elif app_mode == "📤 AI Batch Upload Studio":
                         for doc in existing_docs:
                             d_plat = str(doc.get('platform_name', '')).strip().lower()
                             d_fy = str(doc.get('aus_financial_year', doc.get('financial_year', ''))).strip().upper()
-                            d_role =
+                            d_role = str(doc.get('doc_role', '')).strip().lower()
+                            
+                            if d_plat == extracted_platform and d_fy == extracted_fy and d_role == extracted_role:
+                                param_duplicate = True
+                                break
+
+                        if param_duplicate:
+                            st.warning(f"⚠️ **Skipped**: Record for Platform `{metadata.get('platform_name')}`, FY `{extracted_fy}`, and Role `{metadata.get('doc_role')}` already exists.")
+                            progress.progress((idx + 1) / len(uploaded_files))
+                            continue
+
+                        s_path = f"reports/{file.name}"
+                        supabase.storage.from_("pdfs").upload(s_path, raw_bytes, {"content-type": "application/pdf", "x-upsert": "true"})
+                        pub_url = supabase.storage.from_("pdfs").get_public_url(s_path)
+                        
+                        metadata["source_filename"] = file.name
+                        metadata["download_url"] = pub_url
+                        metadata["created_at"] = time.time()
+                        
+                        db.collection('type2_reports').add(metadata)
+                        existing_docs.append(metadata)
+                        st.success(f" Indexed: `{file.name}` -> **{metadata.get('platform_name')}** ({metadata.get('doc_role')})")
+                    else:
+                        st.error(f"Malformed JSON response for {file.name}")
+                        
+                except Exception as e:
+                    st.error(f"Error handling {file.name}: {e}")
+                finally:
+                    if tmp_path and os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                    
+                progress.progress((idx + 1) / len(uploaded_files))
+            
+            st.cache_data.clear()
+            st.success("Batch indexing complete!")
