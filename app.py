@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import time
 import tempfile
 import streamlit as st
 import pandas as pd
@@ -143,7 +144,7 @@ elif app_mode == "📤 AI Batch Upload Studio":
     st.markdown("""
     <div class="hero-banner">
         <div class="hero-title">AI Batch Processing Studio</div>
-        <div class="hero-subtitle">Parse, extract, and index GS007/SOC1 reports using Gemini AI and Supabase Storage</div>
+        <div class="hero-subtitle">Parse, extract, and index GS007/SOC1 reports using Gemini AI Model Rotation & Supabase Storage</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -160,6 +161,15 @@ elif app_mode == "📤 AI Batch Upload Studio":
             client = genai.Client(api_key=api_key)
             progress = st.progress(0)
             
+            # List of model fallback options
+            MODEL_POOL = [
+                "gemini-2.5-flash",
+                "gemini-1.5-flash",
+                "gemini-2.0-flash",
+                "gemini-1.5-pro",
+                "gemini-2.5-pro"
+            ]
+            
             for idx, file in enumerate(uploaded_files):
                 st.info(f"Processing [{idx+1}/{len(uploaded_files)}]: {file.name}...")
                 raw_bytes = file.getvalue()
@@ -173,7 +183,7 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     st.error(f"Supabase Storage Upload Error: {e}")
                     continue
 
-                # 2. Extract with Gemini
+                # 2. Extract with Gemini Model Rotation
                 tmp_path = None
                 try:
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
@@ -195,10 +205,28 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     Return ONLY valid JSON without markdown formatting or code blocks.
                     """
                     
-                    # Target updated gemini-3.6-flash model
-                    res = client.models.generate_content(model="gemini-3.6-flash", contents=[g_file, prompt])
+                    res = None
+                    last_err = None
                     
-                    # Robust JSON extraction block
+                    # Try models in rotation sequence
+                    for model_name in MODEL_POOL:
+                        try:
+                            res = client.models.generate_content(model=model_name, contents=[g_file, prompt])
+                            if res and res.text:
+                                st.caption(f"✓ Processed via `{model_name}`")
+                                break
+                        except Exception as m_err:
+                            last_err = m_err
+                            # If quota exhausted, pause briefly and fall through to the next model
+                            if "429" in str(m_err) or "RESOURCE_EXHAUSTED" in str(m_err):
+                                time.sleep(3)
+                            continue
+
+                    if not res or not res.text:
+                        st.error(f"Failed to process {file.name} across all models. Error: {last_err}")
+                        continue
+                    
+                    # Clean JSON output
                     clean_text = res.text.strip()
                     clean_text = re.sub(r'^```json\s*', '', clean_text, flags=re.MULTILINE)
                     clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
@@ -222,6 +250,8 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     if tmp_path and os.path.exists(tmp_path):
                         os.remove(tmp_path)
                 
+                # Small pause to avoid hitting global RPM limits
+                time.sleep(2)
                 progress.progress((idx + 1) / len(uploaded_files))
             
             st.cache_data.clear()
