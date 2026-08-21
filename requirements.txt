@@ -1,0 +1,6 @@
+streamlit
+google-cloud-firestore
+google-genai
+pandas
+PyMuPDF
+supabase
