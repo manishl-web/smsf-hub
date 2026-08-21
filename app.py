@@ -3,6 +3,7 @@ import json
 import re
 import time
 import tempfile
+import ast
 import streamlit as st
 import pandas as pd
 import google.cloud.firestore as firestore
@@ -32,6 +33,44 @@ st.markdown("""
     .sub-doc-pill { background: #F1F5F9; border: 1px solid #CBD5E1; border-radius: 8px; padding: 8px 12px; margin-top: 6px; font-size: 0.82rem; }
 </style>
 """, unsafe_allow_html=True)
+
+def robust_json_decode(raw_text):
+    if not raw_text:
+        return None
+    clean_text = raw_text.strip()
+    clean_text = re.sub(r'^```json\s*', '', clean_text, flags=re.MULTILINE)
+    clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
+    clean_text = re.sub(r'```$', '', clean_text, flags=re.MULTILINE).strip()
+    
+    match = re.search(r'\{.*\}', clean_text, re.DOTALL)
+    if not match:
+        return None
+    
+    json_str = match.group(0)
+    
+    # 1. Standard JSON Parse
+    try:
+        return json.loads(json_str)
+    except Exception:
+        pass
+
+    # 2. Clean Trailing Commas
+    json_str_clean = re.sub(r',\s*([}\]])', r'\1', json_str)
+    try:
+        return json.loads(json_str_clean)
+    except Exception:
+        pass
+
+    # 3. Python AST Literal Eval Fallback
+    try:
+        py_str = json_str_clean.replace("true", "True").replace("false", "False").replace("null", "None")
+        res = ast.literal_eval(py_str)
+        if isinstance(res, dict):
+            return res
+    except Exception:
+        pass
+
+    return None
 
 @st.cache_resource
 def init_services():
@@ -108,7 +147,6 @@ if app_mode == "🔍 Search & Analytics Hub":
 
     st.divider()
 
-    # Filter reports
     filtered = []
     for r in reports:
         search_blob = f"{r.get('platform_name', '')} {r.get('auditing_firm', '')} {r.get('audit_opinion', '')} {r.get('key_exceptions_summary', '')}".lower()
@@ -127,7 +165,6 @@ if app_mode == "🔍 Search & Analytics Hub":
         if matches_search and matches_fy and matches_status:
             filtered.append(r)
 
-    # Group reports by Platform Name and AU FY to put staggered reports under one roof
     grouped_reports = {}
     for r in filtered:
         group_key = f"{r.get('platform_name', 'Unknown Platform')} - {r.get('aus_financial_year', r.get('financial_year', 'FY2025'))}"
@@ -135,14 +172,13 @@ if app_mode == "🔍 Search & Analytics Hub":
             grouped_reports[group_key] = []
         grouped_reports[group_key].append(r)
 
-    st.markdown(f"Showing **{len(grouped_reports)}** Compliance Packages ({len(filtered)} documents total):")
+    st.markdown(f"Showing **{len(grouped_reports)}** Compliance Packages ({len(filtered)} total documents):")
 
     for group_key, doc_list in grouped_reports.items():
         primary_doc = doc_list[0]
         platform_name = primary_doc.get('platform_name', 'Unknown Platform')
         aus_fy = primary_doc.get('aus_financial_year', primary_doc.get('financial_year', 'FY2025'))
         
-        # Determine overall opinion
         has_qualified = any("qualified" in str(d.get('audit_opinion', '')).lower() and "unqualified" not in str(d.get('audit_opinion', '')).lower() for d in doc_list)
         overall_opinion = "QUALIFIED" if has_qualified else "UNQUALIFIED"
         badge_class = "badge-qualified" if has_qualified else "badge-unqualified"
@@ -159,7 +195,6 @@ if app_mode == "🔍 Search & Analytics Hub":
             </p>
         """, unsafe_allow_html=True)
         
-        # Render each associated sub-document inside the unified card
         for d in doc_list:
             role_tag = f"<b>[{d.get('doc_role', 'Control Report')}]</b> " if d.get('doc_role') else ""
             date_range = f" ({d.get('date_coverage_period', '')})" if d.get('date_coverage_period') else ""
@@ -235,9 +270,10 @@ elif app_mode == "📤 AI Batch Upload Studio":
             for idx, file in enumerate(uploaded_files):
                 st.info(f"Processing [{idx+1}/{len(uploaded_files)}]: {file.name}...")
                 
+                # Check 1: Filename pre-check
                 filename_duplicate = any(d.get("source_filename") == file.name for d in existing_docs)
                 if filename_duplicate:
-                    st.warning(f"⚠️ **Skipped**: Document with filename `{file.name}` already exists in the database.")
+                    st.warning(f"⚠️ **Skipped**: Document `{file.name}` already exists in database.")
                     progress.progress((idx + 1) / len(uploaded_files))
                     continue
 
@@ -252,19 +288,18 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     g_file = client.files.upload(file=tmp_path, config={"mime_type": "application/pdf"})
                     
                     prompt = """
-                    Extract details from this audit document in raw valid JSON format:
+                    Extract details from this audit document into valid JSON with these exact keys:
                     {
-                        "platform_name": "Primary Platform Name (e.g. Interactive Brokers, BT Panorama)",
+                        "platform_name": "Primary Platform Name (e.g. Morgans, Interactive Brokers, Euroz Hartleys)",
                         "document_type": "GS007 Report, SOC 1 Report, SOC 3 Report, or Bridge Letter",
-                        "date_coverage_period": "Exact period tested, e.g., Jan 2024 - Dec 2024 or Jan 2025 - Jun 2025",
-                        "financial_year": "Original report year e.g. FY2024 or CY2024",
-                        "aus_financial_year": "Corresponding Australian Financial Year (1 July - 30 June) this document supports e.g. FY2024 or FY2025",
-                        "doc_role": "Role e.g., 'Primary SOC Report (Part 1)', 'Primary SOC Report (Part 2)', or 'Gap/Bridge Letter'",
+                        "date_coverage_period": "Exact period tested e.g. 1 July 2024 - 30 June 2025 or Jan 2024 - Dec 2024",
+                        "financial_year": "Original report year e.g. FY2025 or CY2024",
+                        "aus_financial_year": "Corresponding Australian Financial Year (1 July - 30 June) e.g. FY2024 or FY2025",
+                        "doc_role": "Role e.g., 'Primary Control Report', 'Primary SOC Report (Part 1)', or 'Gap/Bridge Letter'",
                         "auditing_firm": "e.g. PwC, Deloitte, KPMG, EY",
                         "audit_opinion": "Unqualified or Qualified",
                         "key_exceptions_summary": "Summary of exceptions or 'None flagged'"
                     }
-                    Return ONLY valid JSON without markdown formatting or code blocks.
                     """
                     
                     res = None
@@ -272,7 +307,11 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     
                     for m_name in active_models:
                         try:
-                            res = client.models.generate_content(model=m_name, contents=[g_file, prompt])
+                            res = client.models.generate_content(
+                                model=m_name, 
+                                contents=[g_file, prompt],
+                                config={"response_mime_type": "application/json", "temperature": 0.1}
+                            )
                             if res and res.text:
                                 break
                         except Exception as m_err:
@@ -285,31 +324,47 @@ elif app_mode == "📤 AI Batch Upload Studio":
                         st.error(f"Failed to process {file.name}. Details: {last_err}")
                         continue
                     
-                    clean_text = res.text.strip()
-                    clean_text = re.sub(r'^```json\s*', '', clean_text, flags=re.MULTILINE)
-                    clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
-                    clean_text = re.sub(r'```$', '', clean_text, flags=re.MULTILINE).strip()
+                    metadata = robust_json_decode(res.text)
                     
-                    match = re.search(r'\{.*\}', clean_text, re.DOTALL)
-                    if match:
-                        metadata = json.loads(match.group(0))
+                    if metadata:
+                        extracted_platform = str(metadata.get('platform_name', '')).strip().lower()
+                        extracted_fy = str(metadata.get('aus_financial_year', metadata.get('financial_year', ''))).strip().upper()
+                        extracted_role = str(metadata.get('doc_role', '')).strip().lower()
+
+                        # Check 2: Parameter-level duplicate check
+                        param_duplicate = False
+                        for doc in existing_docs:
+                            d_plat = str(doc.get('platform_name', '')).strip().lower()
+                            d_fy = str(doc.get('aus_financial_year', doc.get('financial_year', ''))).strip().upper()
+                            d_role = str(doc.get('doc_role', '')).strip().lower()
+                            
+                            if d_plat == extracted_platform and d_fy == extracted_fy and d_role == extracted_role:
+                                param_duplicate = True
+                                break
+
+                        if param_duplicate:
+                            st.error(f"🚫 **Duplicate Blocked**: A {metadata.get('doc_role')} for **{metadata.get('platform_name')}** ({metadata.get('aus_financial_year')}) already exists.")
+                            progress.progress((idx + 1) / len(uploaded_files))
+                            continue
+
+                        # Clean filename for Supabase Object Key
+                        safe_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', file.name)
+                        storage_path = f"reports/{safe_filename}"
                         
-                        storage_path = f"reports/{file.name}"
                         supabase.storage.from_("pdfs").upload(storage_path, raw_bytes, {"x-upsert": "true"})
                         download_url = supabase.storage.from_("pdfs").get_public_url(storage_path)
 
                         metadata["download_url"] = download_url
-                        metadata["source_filename"] = file.name
+                        metadata["source_filename"] = file.name  # Retains human readable title
                         
-                        # Generate unique doc ID incorporating source filename hash to allow multiple sub-documents under same platform/FY
-                        file_slug = re.sub(r'[^a-zA-Z0-9]', '_', file.name).strip('_')
+                        file_slug = re.sub(r'[^a-zA-Z0-9]', '_', safe_filename).strip('_')
                         doc_id = f"doc_{file_slug}"
                         
                         db.collection('type2_reports').document(doc_id).set(metadata)
                         existing_docs.append(metadata)
-                        st.success(f"✅ Extracted and Indexed: **{file.name}** ({metadata.get('platform_name')} -> {metadata.get('aus_financial_year')})")
+                        st.success(f"✅ Extracted and Indexed: **{file.name}** ({metadata.get('platform_name')} - {metadata.get('aus_financial_year')})")
                     else:
-                        st.warning(f"Could not parse JSON output for {file.name}")
+                        st.warning(f"Could not parse valid JSON output for {file.name}")
 
                 except Exception as e:
                     st.error(f"Error processing {file.name}: {e}")
