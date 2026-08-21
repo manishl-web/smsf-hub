@@ -183,7 +183,7 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     g_file = client.files.upload(file=tmp_path, config={"mime_type": "application/pdf"})
                     
                     prompt = """
-                    Extract details from this audit document in raw valid JSON:
+                    Extract details from this audit document in raw valid JSON format:
                     {
                         "platform_name": "Primary Platform Name",
                         "document_type": "GS007 Report or SOC 1 Report",
@@ -192,12 +192,19 @@ elif app_mode == "📤 AI Batch Upload Studio":
                         "audit_opinion": "Unqualified or Qualified",
                         "key_exceptions_summary": "Summary of exceptions or 'None flagged'"
                     }
-                    Return ONLY valid JSON without markdown formatting.
+                    Return ONLY valid JSON without markdown formatting or code blocks.
                     """
                     
-                    res = client.models.generate_content(model="gemini-2.5-flash", contents=[g_file, prompt])
+                    # Target updated gemini-3.6-flash model
+                    res = client.models.generate_content(model="gemini-3.6-flash", contents=[g_file, prompt])
                     
-                    match = re.search(r'\{.*\}', res.text, re.DOTALL)
+                    # Robust JSON extraction block
+                    clean_text = res.text.strip()
+                    clean_text = re.sub(r'^```json\s*', '', clean_text, flags=re.MULTILINE)
+                    clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
+                    clean_text = re.sub(r'```$', '', clean_text, flags=re.MULTILINE).strip()
+                    
+                    match = re.search(r'\{.*\}', clean_text, re.DOTALL)
                     if match:
                         metadata = json.loads(match.group(0))
                         metadata["download_url"] = download_url
