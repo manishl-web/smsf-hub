@@ -6,10 +6,12 @@ import tempfile
 import ast
 import streamlit as st
 import pandas as pd
+import numpy as np
 import google.cloud.firestore as firestore
 from google import genai
 from supabase import create_client
 
+# ---------------- PAGE CONFIG & STYLING ----------------
 st.set_page_config(
     page_title="SMSF Audit Hub | Enterprise Portal",
     page_icon="🛡️",
@@ -34,6 +36,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
+# ---------------- INITIALIZE CONNECTIONS ----------------
 @st.cache_resource
 def init_services():
     db = None
@@ -57,6 +61,8 @@ def init_services():
 
 db, supabase = init_services()
 
+
+# ---------------- DATA FETCHERS ----------------
 @st.cache_data(ttl=300)
 def fetch_reports():
     if not db:
@@ -84,14 +90,33 @@ def fetch_unlisted():
     except Exception:
         return pd.DataFrame()
 
+def robust_json_decode(text):
+    try:
+        return json.loads(text)
+    except Exception:
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                try:
+                    return ast.literal_eval(match.group(0))
+                except Exception:
+                    pass
+    return None
+
+
+# ---------------- NAVIGATION SIDEBAR ----------------
 st.sidebar.title("🛡️ Audit Portal")
 app_mode = st.sidebar.radio("Navigate", ["🔍 Search & Analytics Hub", "📤 AI & Database Admin Studio"])
 api_key = st.sidebar.text_input("Gemini API Key", type="password", value=st.secrets.get("GEMINI_API_KEY", ""))
 
+
+# ---------------- MODE 1: SEARCH & ANALYTICS HUB ----------------
 if app_mode == "🔍 Search & Analytics Hub":
     tab1, tab2, tab3 = st.tabs(["📄 PDF Compliance Hub", "🏢 Property Register", "📈 Unlisted Investment Register"])
 
-    # ---------------- TAB 1: PDF COMPLIANCE HUB ----------------
+    # --- TAB 1: PDF COMPLIANCE HUB ---
     with tab1:
         st.markdown("""
         <div class="hero-banner">
@@ -198,7 +223,7 @@ if app_mode == "🔍 Search & Analytics Hub":
             
             st.markdown("</div>", unsafe_allow_html=True)
 
-    # ---------------- TAB 2: PROPERTY REGISTER ----------------
+    # --- TAB 2: PROPERTY REGISTER ---
     with tab2:
         st.markdown("""
         <div class="hero-banner">
@@ -246,7 +271,7 @@ if app_mode == "🔍 Search & Analytics Hub":
         else:
             st.info("No records currently stored in `property_register`. Go to 'AI & Database Admin Studio' to perform a 1-click cloud sync.")
 
-    # ---------------- TAB 3: UNLISTED REGISTER ----------------
+    # --- TAB 3: UNLISTED REGISTER ---
     with tab3:
         st.markdown("""
         <div class="hero-banner">
@@ -294,6 +319,8 @@ if app_mode == "🔍 Search & Analytics Hub":
         else:
             st.info("No records currently stored in `unlisted_register`. Go to 'AI & Database Admin Studio' to perform a 1-click cloud sync.")
 
+
+# ---------------- MODE 2: ADMIN & UPLOAD STUDIO ----------------
 elif app_mode == "📤 AI & Database Admin Studio":
     st.markdown("""
     <div class="hero-banner">
@@ -304,12 +331,14 @@ elif app_mode == "📤 AI & Database Admin Studio":
 
     admin_tab1, admin_tab2 = st.tabs(["📊 Register Data Cloud Sync", "📄 PDF Batch Uploader"])
 
+    # --- ADMIN TAB 1: CSV REGISTER SYNC ---
     with admin_tab1:
         st.subheader("Cloud Register Ingestion")
         st.caption("Upload your master CSV files to permanently store records in Supabase.")
 
         col_p, col_u = st.columns(2)
 
+        # Property Sync
         with col_p:
             st.markdown("#### 🏢 Property Register Sync")
             prop_file = st.file_uploader("Select `Property Database.csv`", type=["csv"], key="sync_p")
@@ -340,7 +369,10 @@ elif app_mode == "📤 AI & Database Admin Studio":
                             'Notes': 'notes'
                         }
                         df = df.rename(columns=column_mapping)
-                        df = df.where(pd.notnull(df), None)
+                        
+                        # Fix NaN & Out-of-Range Inf Errors for JSON Compliance
+                        df = df.replace([np.inf, -np.inf], None)
+                        df = df.astype(object).where(pd.notnull(df), None)
                         records = df.to_dict(orient='records')
 
                         # Batch insert
@@ -354,6 +386,7 @@ elif app_mode == "📤 AI & Database Admin Studio":
                     except Exception as e:
                         st.error(f"Sync failed: {e}")
 
+        # Unlisted Sync
         with col_u:
             st.markdown("#### 📈 Unlisted Entity Register Sync")
             unlisted_file = st.file_uploader("Select `Unlisted Entity Database.csv`", type=["csv"], key="sync_u")
@@ -381,7 +414,10 @@ elif app_mode == "📤 AI & Database Admin Studio":
                             'Note/Links': 'note_links'
                         }
                         df = df.rename(columns=column_mapping)
-                        df = df.where(pd.notnull(df), None)
+                        
+                        # Fix NaN & Out-of-Range Inf Errors for JSON Compliance
+                        df = df.replace([np.inf, -np.inf], None)
+                        df = df.astype(object).where(pd.notnull(df), None)
                         records = df.to_dict(orient='records')
 
                         supabase.table('unlisted_register').insert(records).execute()
@@ -390,6 +426,7 @@ elif app_mode == "📤 AI & Database Admin Studio":
                     except Exception as e:
                         st.error(f"Sync failed: {e}")
 
+    # --- ADMIN TAB 2: PDF UPLOADER ---
     with admin_tab2:
         with st.expander("🚨 Database Maintenance & Reset Options"):
             st.warning("⚠️ Permanently delete indexed PDF metadata from Firestore and files from Supabase Storage.")
@@ -446,7 +483,6 @@ elif app_mode == "📤 AI & Database Admin Studio":
                 client = genai.Client(api_key=api_key)
                 active_models = ["gemini-2.5-flash", "gemini-1.5-flash"]
                 progress = st.progress(0)
-                existing_docs = [d.to_dict() for d in db.collection('type2_reports').stream()]
                 
                 for idx, file in enumerate(uploaded_files):
                     st.info(f"Processing [{idx+1}/{len(uploaded_files)}]: {file.name}...")
