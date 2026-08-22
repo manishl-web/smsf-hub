@@ -294,13 +294,6 @@ elif app_mode == "📤 AI Batch Upload Studio":
             
             for idx, file in enumerate(uploaded_files):
                 st.info(f"Processing [{idx+1}/{len(uploaded_files)}]: {file.name}...")
-                
-                # Pre-check: Duplicate Filename
-                filename_duplicate = any(d.get("source_filename") == file.name for d in existing_docs)
-                if filename_duplicate:
-                    st.warning(f"⚠️ **Skipped**: Document `{file.name}` already exists in database.")
-                    progress.progress((idx + 1) / len(uploaded_files))
-                    continue
 
                 raw_bytes = file.getvalue()
                 tmp_path = None
@@ -313,18 +306,19 @@ elif app_mode == "📤 AI Batch Upload Studio":
                     g_file = client.files.upload(file=tmp_path, config={"mime_type": "application/pdf"})
                     
                     prompt = """
-                    Extract details from this audit document into valid JSON with these exact keys:
+                    Analyze the internal text of this audit report carefully and extract the details into valid JSON with these exact keys:
                     {
-                        "platform_name": "Primary Platform Name (e.g. Morgans, Interactive Brokers, Euroz Hartleys)",
+                        "platform_name": "Primary Platform Name (e.g. Morgans, Interactive Brokers, DNR AFSL Pty Ltd)",
                         "document_type": "GS007 Report, SOC 1 Report, SOC 3 Report, or Bridge Letter",
-                        "date_coverage_period": "Exact period tested e.g. 1 July 2024 - 30 June 2025 or Jan 2024 - Dec 2024",
-                        "financial_year": "Original report year e.g. FY2025 or CY2024",
-                        "aus_financial_year": "Corresponding Australian Financial Year (1 July - 30 June) e.g. FY2024 or FY2025",
+                        "date_coverage_period": "Exact period tested inside the text e.g. 1 July 2022 - 30 June 2023 or 1 July 2023 - 30 June 2024",
+                        "financial_year": "Original report year e.g. FY2023 or FY2024",
+                        "aus_financial_year": "Corresponding Australian Financial Year based strictly on the period tested e.g., period ending 30 June 2023 is FY2023, period ending 30 June 2024 is FY2024",
                         "doc_role": "Role e.g., 'Primary Control Report', 'Primary SOC Report (Part 1)', or 'Gap/Bridge Letter'",
-                        "auditing_firm": "e.g. PwC, Deloitte, KPMG, EY",
+                        "auditing_firm": "e.g. PwC, Deloitte, KPMG, EY, PKF Brisbane Audit",
                         "audit_opinion": "Unqualified or Qualified",
                         "key_exceptions_summary": "Summary of exceptions or 'None flagged'"
                     }
+                    Note: Determine the financial year (aus_financial_year) strictly from the testing period written inside the report body, NOT from external file naming.
                     """
                     
                     res = None
@@ -355,24 +349,28 @@ elif app_mode == "📤 AI Batch Upload Studio":
                         extracted_platform = str(metadata.get('platform_name', '')).strip().lower()
                         extracted_fy = str(metadata.get('aus_financial_year', metadata.get('financial_year', ''))).strip().upper()
                         extracted_role = str(metadata.get('doc_role', '')).strip().lower()
+                        extracted_period = str(metadata.get('date_coverage_period', '')).strip().lower()
 
-                        # Post-check: Duplicate Metadata Parameters
+                        # Check if duplicate record exists for Platform + FY + Coverage Period + Doc Role
                         param_duplicate = False
                         for doc in existing_docs:
                             d_plat = str(doc.get('platform_name', '')).strip().lower()
                             d_fy = str(doc.get('aus_financial_year', doc.get('financial_year', ''))).strip().upper()
                             d_role = str(doc.get('doc_role', '')).strip().lower()
+                            d_period = str(doc.get('date_coverage_period', '')).strip().lower()
                             
-                            if d_plat == extracted_platform and d_fy == extracted_fy and d_role == extracted_role:
+                            if d_plat == extracted_platform and d_fy == extracted_fy and d_role == extracted_role and d_period == extracted_period:
                                 param_duplicate = True
                                 break
 
                         if param_duplicate:
-                            st.warning(f"⚠️ **Skipped**: Record for Platform `{metadata.get('platform_name')}`, FY `{extracted_fy}`, and Role `{metadata.get('doc_role')}` already exists.")
+                            st.warning(f"⚠️ **Skipped**: Record for `{metadata.get('platform_name')}`, FY `{extracted_fy}` ({metadata.get('date_coverage_period')}) already exists.")
                             progress.progress((idx + 1) / len(uploaded_files))
                             continue
 
-                        s_path = f"reports/{file.name}"
+                        # Ensure safe Supabase filename storage
+                        safe_filename = file.name.replace(" ", "_")
+                        s_path = f"reports/{safe_filename}"
                         supabase.storage.from_("pdfs").upload(s_path, raw_bytes, {"content-type": "application/pdf", "x-upsert": "true"})
                         pub_url = supabase.storage.from_("pdfs").get_public_url(s_path)
                         
@@ -382,7 +380,7 @@ elif app_mode == "📤 AI Batch Upload Studio":
                         
                         db.collection('type2_reports').add(metadata)
                         existing_docs.append(metadata)
-                        st.success(f" Indexed: `{file.name}` -> **{metadata.get('platform_name')}** ({metadata.get('doc_role')})")
+                        st.success(f" Indexed: `{file.name}` -> **{metadata.get('platform_name')}** ({metadata.get('aus_financial_year')} - {metadata.get('date_coverage_period')})")
                     else:
                         st.error(f"Malformed JSON response for {file.name}")
                         
