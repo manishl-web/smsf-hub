@@ -136,7 +136,9 @@ if app_mode == "🔍 Search & Analytics Hub":
     m4.markdown(f'<div class="metric-box"><div class="metric-label">FY2025 Reports</div><div class="metric-value" style="color:#2563EB;">{fy25}</div></div>', unsafe_allow_html=True)
 
     st.write("")
-    fcol1, fcol2, fcol3 = st.columns([2, 1, 1])
+    
+    # Filter Controls
+    fcol1, fcol2, fcol3, fcol4 = st.columns([2, 1, 1, 1])
     with fcol1:
         q = st.text_input("🔍 Keyword Search (Platform, Auditor, Exceptions)", "").strip().lower()
     with fcol2:
@@ -144,9 +146,10 @@ if app_mode == "🔍 Search & Analytics Hub":
         fy_sel = st.selectbox("Financial Year", fy_options)
     with fcol3:
         status_sel = st.selectbox("Audit Status Filter", ["All Reports", "Qualified Only", "Unqualified Only"])
+    with fcol4:
+        sort_order = st.selectbox("Sort Alphabetically", ["A-Z (Ascending)", "Z-A (Descending)"])
 
-    st.divider()
-
+    # Filtering logic
     filtered = []
     for r in reports:
         search_blob = f"{r.get('platform_name', '')} {r.get('auditing_firm', '')} {r.get('audit_opinion', '')} {r.get('key_exceptions_summary', '')}".lower()
@@ -165,6 +168,7 @@ if app_mode == "🔍 Search & Analytics Hub":
         if matches_search and matches_fy and matches_status:
             filtered.append(r)
 
+    # Group reports by Platform + Financial Year
     grouped_reports = {}
     for r in filtered:
         group_key = f"{r.get('platform_name', 'Unknown Platform')} - {r.get('aus_financial_year', r.get('financial_year', 'FY2025'))}"
@@ -172,9 +176,34 @@ if app_mode == "🔍 Search & Analytics Hub":
             grouped_reports[group_key] = []
         grouped_reports[group_key].append(r)
 
-    st.markdown(f"Showing **{len(grouped_reports)}** Compliance Packages ({len(filtered)} total documents):")
+    # Sort groups alphabetically by Platform Name
+    reverse_sort = (sort_order == "Z-A (Descending)")
+    sorted_group_keys = sorted(
+        grouped_reports.keys(),
+        key=lambda x: x.lower(),
+        reverse=reverse_sort
+    )
 
-    for group_key, doc_list in grouped_reports.items():
+    # Alphabetical Letter Quick Filter Bar
+    st.write("")
+    st.markdown("<b>🔤 Quick Alphabet Filter:</b>", unsafe_allow_html=True)
+    letters = ["ALL"] + list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    selected_letter = st.radio("A-Z Bar", letters, horizontal=True, label_visibility="collapsed")
+
+    # Filter by selected letter
+    if selected_letter != "ALL":
+        sorted_group_keys = [
+            k for k in sorted_group_keys 
+            if k.strip().upper().startswith(selected_letter)
+        ]
+
+    st.divider()
+
+    st.markdown(f"Showing **{len(sorted_group_keys)}** Compliance Packages ({len(filtered)} total documents):")
+
+    # Render sorted and categorized cards
+    for group_key in sorted_group_keys:
+        doc_list = grouped_reports[group_key]
         primary_doc = doc_list[0]
         platform_name = primary_doc.get('platform_name', 'Unknown Platform')
         aus_fy = primary_doc.get('aus_financial_year', primary_doc.get('financial_year', 'FY2025'))
