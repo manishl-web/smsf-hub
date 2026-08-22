@@ -21,7 +21,7 @@ st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
     html, body, [class*="css"] { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #F8FAFC; }
-    .hero-banner { background: linear-gradient(135deg, #0F172A 0%, #1E293B 50%, #1E40AF 100%); padding: 2.2rem 2rem; border-radius: 20px; color: white; margin-bottom: 1.5rem; }
+    .hero-banner { background: linear-gradient(135deg, #0F172A 0%, #1E293B 50%, #1E40AF 100%); padding: 2rem 2rem; border-radius: 20px; color: white; margin-bottom: 1.5rem; }
     .hero-title { font-size: 2.2rem; font-weight: 800; margin-bottom: 0.2rem; }
     .hero-subtitle { font-size: 0.95rem; color: #94A3B8; font-weight: 400; }
     .glass-card { background: rgba(255, 255, 255, 0.95); border: 1px solid #E2E8F0; border-radius: 16px; padding: 1.5rem; margin-bottom: 1.25rem; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.03); }
@@ -33,44 +33,6 @@ st.markdown("""
     .sub-doc-pill { background: #F1F5F9; border: 1px solid #CBD5E1; border-radius: 8px; padding: 8px 12px; margin-top: 6px; font-size: 0.82rem; }
 </style>
 """, unsafe_allow_html=True)
-
-def robust_json_decode(raw_text):
-    if not raw_text:
-        return None
-    clean_text = raw_text.strip()
-    clean_text = re.sub(r'^```json\s*', '', clean_text, flags=re.MULTILINE)
-    clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
-    clean_text = re.sub(r'```$', '', clean_text, flags=re.MULTILINE).strip()
-    
-    match = re.search(r'\{.*\}', clean_text, re.DOTALL)
-    if not match:
-        return None
-    
-    json_str = match.group(0)
-    
-    # 1. Standard JSON Parse
-    try:
-        return json.loads(json_str)
-    except Exception:
-        pass
-
-    # 2. Clean Trailing Commas
-    json_str_clean = re.sub(r',\s*([}\]])', r'\1', json_str)
-    try:
-        return json.loads(json_str_clean)
-    except Exception:
-        pass
-
-    # 3. Python AST Literal Eval Fallback
-    try:
-        py_str = json_str_clean.replace("true", "True").replace("false", "False").replace("null", "None")
-        res = ast.literal_eval(py_str)
-        if isinstance(res, dict):
-            return res
-    except Exception:
-        pass
-
-    return None
 
 @st.cache_resource
 def init_services():
@@ -95,16 +57,6 @@ def init_services():
 
 db, supabase = init_services()
 
-if db:
-    st.sidebar.markdown('🌐 <span style="color:#166534; font-weight:700;">Firestore Connected</span>', unsafe_allow_html=True)
-else:
-    st.sidebar.warning("⚠️ Firestore Offline")
-
-if supabase:
-    st.sidebar.markdown('⚡ <span style="color:#166534; font-weight:700;">Supabase Storage Connected</span>', unsafe_allow_html=True)
-else:
-    st.sidebar.warning("⚠️ Supabase Offline")
-
 @st.cache_data(ttl=300)
 def fetch_reports():
     if not db:
@@ -112,314 +64,447 @@ def fetch_reports():
     docs = list(db.collection('type2_reports').stream())
     return [d.to_dict() for d in docs]
 
+@st.cache_data(ttl=300)
+def fetch_properties():
+    if not supabase:
+        return pd.DataFrame()
+    try:
+        response = supabase.table("property_register").select("*").execute()
+        return pd.DataFrame(response.data)
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=300)
+def fetch_unlisted():
+    if not supabase:
+        return pd.DataFrame()
+    try:
+        response = supabase.table("unlisted_register").select("*").execute()
+        return pd.DataFrame(response.data)
+    except Exception:
+        return pd.DataFrame()
+
 st.sidebar.title("🛡️ Audit Portal")
-app_mode = st.sidebar.radio("Navigate", ["🔍 Search & Analytics Hub", "📤 AI Batch Upload Studio"])
+app_mode = st.sidebar.radio("Navigate", ["🔍 Search & Analytics Hub", "📤 AI & Database Admin Studio"])
 api_key = st.sidebar.text_input("Gemini API Key", type="password", value=st.secrets.get("GEMINI_API_KEY", ""))
 
 if app_mode == "🔍 Search & Analytics Hub":
-    st.markdown("""
-    <div class="hero-banner">
-        <div class="hero-title">SMSF Verification Engine</div>
-        <div class="hero-subtitle">Real-time GS007, SOC 1, and ASAE 3402 Compliance Intelligence</div>
-    </div>
-    """, unsafe_allow_html=True)
+    tab1, tab2, tab3 = st.tabs(["📄 PDF Compliance Hub", "🏢 Property Register", "📈 Unlisted Investment Register"])
 
-    reports = fetch_reports()
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.markdown(f'<div class="metric-box"><div class="metric-label">Indexed Documents</div><div class="metric-value">{len(reports)}</div></div>', unsafe_allow_html=True)
-    clean_opinions = sum(1 for r in reports if 'unqualified' in str(r.get('audit_opinion', '')).lower())
-    m2.markdown(f'<div class="metric-box"><div class="metric-label">Unqualified Reports</div><div class="metric-value" style="color:#16A34A;">{clean_opinions}</div></div>', unsafe_allow_html=True)
-    exceptions = len(reports) - clean_opinions
-    m3.markdown(f'<div class="metric-box"><div class="metric-label">Exceptions Flagged</div><div class="metric-value" style="color:#DC2626;">{exceptions}</div></div>', unsafe_allow_html=True)
-    fy25 = sum(1 for r in reports if 'FY2025' in str(r.get('aus_financial_year', '')) or '2025' in str(r.get('financial_year', '')))
-    m4.markdown(f'<div class="metric-box"><div class="metric-label">FY2025 Reports</div><div class="metric-value" style="color:#2563EB;">{fy25}</div></div>', unsafe_allow_html=True)
-
-    st.write("")
-    
-    # Filter Controls
-    fcol1, fcol2, fcol3, fcol4 = st.columns([2, 1, 1, 1])
-    with fcol1:
-        q = st.text_input("🔍 Keyword Search (Platform, Auditor, Exceptions)", "").strip().lower()
-    with fcol2:
-        fy_options = ["All Years"] + [f"FY{year}" for year in range(2021, 2031)]
-        fy_sel = st.selectbox("Financial Year", fy_options)
-    with fcol3:
-        status_sel = st.selectbox("Audit Status Filter", ["All Reports", "Qualified Only", "Unqualified Only"])
-    with fcol4:
-        sort_order = st.selectbox("Sort Alphabetically", ["A-Z (Ascending)", "Z-A (Descending)"])
-
-    # Filtering logic
-    filtered = []
-    for r in reports:
-        search_blob = f"{r.get('platform_name', '')} {r.get('auditing_firm', '')} {r.get('audit_opinion', '')} {r.get('key_exceptions_summary', '')}".lower()
-        matches_search = (q in search_blob) if q else True
-        
-        doc_fy = f"{r.get('aus_financial_year', '')} {r.get('financial_year', '')}".upper()
-        matches_fy = True if fy_sel == "All Years" else (fy_sel.replace("FY", "") in doc_fy)
-        
-        opinion_str = str(r.get('audit_opinion', '')).lower()
-        matches_status = True
-        if status_sel == "Qualified Only":
-            matches_status = "qualified" in opinion_str and "unqualified" not in opinion_str
-        elif status_sel == "Unqualified Only":
-            matches_status = "unqualified" in opinion_str
-
-        if matches_search and matches_fy and matches_status:
-            filtered.append(r)
-
-    # Group reports by Platform + Financial Year
-    grouped_reports = {}
-    for r in filtered:
-        group_key = f"{r.get('platform_name', 'Unknown Platform')} - {r.get('aus_financial_year', r.get('financial_year', 'FY2025'))}"
-        if group_key not in grouped_reports:
-            grouped_reports[group_key] = []
-        grouped_reports[group_key].append(r)
-
-    # Sort groups alphabetically by Platform Name
-    reverse_sort = (sort_order == "Z-A (Descending)")
-    sorted_group_keys = sorted(
-        grouped_reports.keys(),
-        key=lambda x: x.lower(),
-        reverse=reverse_sort
-    )
-
-    # Alphabetical Letter Quick Filter Bar
-    st.write("")
-    st.markdown("<b>🔤 Quick Alphabet Filter:</b>", unsafe_allow_html=True)
-    letters = ["ALL"] + list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-    selected_letter = st.radio("A-Z Bar", letters, horizontal=True, label_visibility="collapsed")
-
-    # Filter by selected letter
-    if selected_letter != "ALL":
-        sorted_group_keys = [
-            k for k in sorted_group_keys 
-            if k.strip().upper().startswith(selected_letter)
-        ]
-
-    st.divider()
-
-    st.markdown(f"Showing **{len(sorted_group_keys)}** Compliance Packages ({len(filtered)} total documents):")
-
-    # Render sorted and categorized cards
-    for group_key in sorted_group_keys:
-        doc_list = grouped_reports[group_key]
-        primary_doc = doc_list[0]
-        platform_name = primary_doc.get('platform_name', 'Unknown Platform')
-        aus_fy = primary_doc.get('aus_financial_year', primary_doc.get('financial_year', 'FY2025'))
-        
-        has_qualified = any("qualified" in str(d.get('audit_opinion', '')).lower() and "unqualified" not in str(d.get('audit_opinion', '')).lower() for d in doc_list)
-        overall_opinion = "QUALIFIED" if has_qualified else "UNQUALIFIED"
-        badge_class = "badge-qualified" if has_qualified else "badge-unqualified"
-
-        st.markdown(f"""
-        <div class="glass-card">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <h3 style="margin:0; color:#0F172A; font-weight:700;">🏢 {platform_name} &nbsp;<span style="color:#2563EB; font-size:1.1rem;">({aus_fy} Compliance File)</span></h3>
-                <span class="{badge_class}">{overall_opinion}</span>
-            </div>
-            <p style="color:#64748B; font-size:0.88rem; margin: 8px 0 14px 0;">
-                <strong>Auditor:</strong> {primary_doc.get('auditing_firm', 'N/A')} &nbsp;•&nbsp; 
-                <strong>Sub-documents Attached:</strong> {len(doc_list)}
-            </p>
+    # ---------------- TAB 1: PDF COMPLIANCE HUB ----------------
+    with tab1:
+        st.markdown("""
+        <div class="hero-banner">
+            <div class="hero-title">SMSF Verification Engine</div>
+            <div class="hero-subtitle">Real-time GS007, SOC 1, and ASAE 3402 Compliance Intelligence</div>
+        </div>
         """, unsafe_allow_html=True)
-        
-        for d in doc_list:
-            role_tag = f"<b>[{d.get('doc_role', 'Control Report')}]</b> " if d.get('doc_role') else ""
-            date_range = f" ({d.get('date_coverage_period', '')})" if d.get('date_coverage_period') else ""
-            
-            col_left, col_right = st.columns([4, 1])
-            with col_left:
-                st.markdown(f"""
-                <div class="sub-doc-pill">
-                    📄 {role_tag}<strong>{d.get('source_filename', 'Report.pdf')}</strong>{date_range}<br/>
-                    <span style="color:#475569;">Exceptions: {d.get('key_exceptions_summary', 'None flagged')}</span>
-                </div>
-                """, unsafe_allow_html=True)
-            with col_right:
-                if d.get('download_url'):
-                    st.link_button("📥 Download", d['download_url'])
-        
-        st.markdown("</div>", unsafe_allow_html=True)
 
-elif app_mode == "📤 AI Batch Upload Studio":
+        reports = fetch_reports()
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.markdown(f'<div class="metric-box"><div class="metric-label">Indexed Documents</div><div class="metric-value">{len(reports)}</div></div>', unsafe_allow_html=True)
+        clean_opinions = sum(1 for r in reports if 'unqualified' in str(r.get('audit_opinion', '')).lower())
+        m2.markdown(f'<div class="metric-box"><div class="metric-label">Unqualified Reports</div><div class="metric-value" style="color:#16A34A;">{clean_opinions}</div></div>', unsafe_allow_html=True)
+        exceptions = len(reports) - clean_opinions
+        m3.markdown(f'<div class="metric-box"><div class="metric-label">Exceptions Flagged</div><div class="metric-value" style="color:#DC2626;">{exceptions}</div></div>', unsafe_allow_html=True)
+        fy25 = sum(1 for r in reports if 'FY2025' in str(r.get('aus_financial_year', '')) or '2025' in str(r.get('financial_year', '')))
+        m4.markdown(f'<div class="metric-box"><div class="metric-label">FY2025 Reports</div><div class="metric-value" style="color:#2563EB;">{fy25}</div></div>', unsafe_allow_html=True)
+
+        st.write("")
+        fcol1, fcol2, fcol3, fcol4 = st.columns([2, 1, 1, 1])
+        with fcol1:
+            q = st.text_input("🔍 Keyword Search (Platform, Auditor, Exceptions)", "").strip().lower()
+        with fcol2:
+            fy_options = ["All Years"] + [f"FY{year}" for year in range(2021, 2031)]
+            fy_sel = st.selectbox("Financial Year", fy_options)
+        with fcol3:
+            status_sel = st.selectbox("Audit Status Filter", ["All Reports", "Qualified Only", "Unqualified Only"])
+        with fcol4:
+            sort_order = st.selectbox("Sort Alphabetically", ["A-Z (Ascending)", "Z-A (Descending)"])
+
+        filtered = []
+        for r in reports:
+            search_blob = f"{r.get('platform_name', '')} {r.get('auditing_firm', '')} {r.get('audit_opinion', '')} {r.get('key_exceptions_summary', '')}".lower()
+            matches_search = (q in search_blob) if q else True
+            doc_fy = f"{r.get('aus_financial_year', '')} {r.get('financial_year', '')}".upper()
+            matches_fy = True if fy_sel == "All Years" else (fy_sel.replace("FY", "") in doc_fy)
+            opinion_str = str(r.get('audit_opinion', '')).lower()
+            matches_status = True
+            if status_sel == "Qualified Only":
+                matches_status = "qualified" in opinion_str and "unqualified" not in opinion_str
+            elif status_sel == "Unqualified Only":
+                matches_status = "unqualified" in opinion_str
+
+            if matches_search and matches_fy and matches_status:
+                filtered.append(r)
+
+        grouped_reports = {}
+        for r in filtered:
+            group_key = f"{r.get('platform_name', 'Unknown Platform')} - {r.get('aus_financial_year', r.get('financial_year', 'FY2025'))}"
+            if group_key not in grouped_reports:
+                grouped_reports[group_key] = []
+            grouped_reports[group_key].append(r)
+
+        reverse_sort = (sort_order == "Z-A (Descending)")
+        sorted_group_keys = sorted(grouped_reports.keys(), key=lambda x: x.lower(), reverse=reverse_sort)
+
+        st.write("")
+        st.markdown("<b>🔤 Quick Alphabet Filter:</b>", unsafe_allow_html=True)
+        letters = ["ALL"] + list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        selected_letter = st.radio("A-Z Bar", letters, horizontal=True, label_visibility="collapsed")
+
+        if selected_letter != "ALL":
+            sorted_group_keys = [k for k in sorted_group_keys if k.strip().upper().startswith(selected_letter)]
+
+        st.divider()
+        st.markdown(f"Showing **{len(sorted_group_keys)}** Compliance Packages ({len(filtered)} total documents):")
+
+        for group_key in sorted_group_keys:
+            doc_list = grouped_reports[group_key]
+            primary_doc = doc_list[0]
+            platform_name = primary_doc.get('platform_name', 'Unknown Platform')
+            aus_fy = primary_doc.get('aus_financial_year', primary_doc.get('financial_year', 'FY2025'))
+            has_qualified = any("qualified" in str(d.get('audit_opinion', '')).lower() and "unqualified" not in str(d.get('audit_opinion', '')).lower() for d in doc_list)
+            overall_opinion = "QUALIFIED" if has_qualified else "UNQUALIFIED"
+            badge_class = "badge-qualified" if has_qualified else "badge-unqualified"
+
+            st.markdown(f"""
+            <div class="glass-card">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3 style="margin:0; color:#0F172A; font-weight:700;">🏢 {platform_name} &nbsp;<span style="color:#2563EB; font-size:1.1rem;">({aus_fy} Compliance File)</span></h3>
+                    <span class="{badge_class}">{overall_opinion}</span>
+                </div>
+                <p style="color:#64748B; font-size:0.88rem; margin: 8px 0 14px 0;">
+                    <strong>Auditor:</strong> {primary_doc.get('auditing_firm', 'N/A')} &nbsp;•&nbsp; 
+                    <strong>Sub-documents Attached:</strong> {len(doc_list)}
+                </p>
+            """, unsafe_allow_html=True)
+            
+            for d in doc_list:
+                role_tag = f"<b>[{d.get('doc_role', 'Control Report')}]</b> " if d.get('doc_role') else ""
+                date_range = f" ({d.get('date_coverage_period', '')})" if d.get('date_coverage_period') else ""
+                col_left, col_right = st.columns([4, 1])
+                with col_left:
+                    st.markdown(f"""
+                    <div class="sub-doc-pill">
+                        📄 {role_tag}<strong>{d.get('source_filename', 'Report.pdf')}</strong>{date_range}<br/>
+                        <span style="color:#475569;">Exceptions: {d.get('key_exceptions_summary', 'None flagged')}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with col_right:
+                    if d.get('download_url'):
+                        st.link_button("📥 Download", d['download_url'])
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    # ---------------- TAB 2: PROPERTY REGISTER ----------------
+    with tab2:
+        st.markdown("""
+        <div class="hero-banner">
+            <div class="hero-title">Property Audit Register</div>
+            <div class="hero-subtitle">Permanently stored cloud database for properties across financial years</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        df_prop = fetch_properties()
+
+        if not df_prop.empty:
+            p1, p2, p3, p4 = st.columns(4)
+            p1.markdown(f'<div class="metric-box"><div class="metric-label">Total Stored Properties</div><div class="metric-value">{len(df_prop)}</div></div>', unsafe_allow_html=True)
+            years = df_prop['audit_year_end'].dropna().astype(str).unique() if 'audit_year_end' in df_prop.columns else []
+            p2.markdown(f'<div class="metric-box"><div class="metric-label">Audit Years Covered</div><div class="metric-value" style="color:#2563EB;">{len(years)}</div></div>', unsafe_allow_html=True)
+            states = df_prop['state'].dropna().astype(str).unique() if 'state' in df_prop.columns else []
+            p3.markdown(f'<div class="metric-box"><div class="metric-label">States / Regions</div><div class="metric-value">{len(states)}</div></div>', unsafe_allow_html=True)
+            types = df_prop['type_of_property'].dropna().astype(str).unique() if 'type_of_property' in df_prop.columns else []
+            p4.markdown(f'<div class="metric-box"><div class="metric-label">Property Types</div><div class="metric-value">{len(types)}</div></div>', unsafe_allow_html=True)
+
+            st.write("")
+            f1, f2, f3, f4 = st.columns(4)
+            with f1:
+                sel_year = st.multiselect("Audit Year End", sorted([str(y) for y in years]))
+            with f2:
+                sel_state = st.multiselect("State", sorted([str(s) for s in states]))
+            with f3:
+                sel_type = st.multiselect("Type of Property", sorted([str(t) for t in types]))
+            with f4:
+                search_addr = st.text_input("🔍 Search Address / Suburb", "").strip().lower()
+
+            filtered_p = df_prop.copy()
+            if sel_year:
+                filtered_p = filtered_p[filtered_p['audit_year_end'].astype(str).isin(sel_year)]
+            if sel_state:
+                filtered_p = filtered_p[filtered_p['state'].astype(str).isin(sel_state)]
+            if sel_type:
+                filtered_p = filtered_p[filtered_p['type_of_property'].astype(str).isin(sel_type)]
+            if search_addr:
+                mask = filtered_p.apply(lambda row: search_addr in str(row.values).lower(), axis=1)
+                filtered_p = filtered_p[mask]
+
+            st.markdown(f"Displaying **{len(filtered_p)}** of **{len(df_prop)}** stored property records:")
+            st.dataframe(filtered_p, use_container_width=True)
+        else:
+            st.info("No records currently stored in `property_register`. Go to 'AI & Database Admin Studio' to perform a 1-click cloud sync.")
+
+    # ---------------- TAB 3: UNLISTED REGISTER ----------------
+    with tab3:
+        st.markdown("""
+        <div class="hero-banner">
+            <div class="hero-title">Unlisted Investment Register</div>
+            <div class="hero-subtitle">Permanently stored cloud database for unlisted entities and valuations</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        df_unlisted = fetch_unlisted()
+
+        if not df_unlisted.empty:
+            u1, u2, u3, u4 = st.columns(4)
+            u1.markdown(f'<div class="metric-box"><div class="metric-label">Total Stored Entities</div><div class="metric-value">{len(df_unlisted)}</div></div>', unsafe_allow_html=True)
+            u_years = df_unlisted['year'].dropna().astype(str).unique() if 'year' in df_unlisted.columns else []
+            u2.markdown(f'<div class="metric-box"><div class="metric-label">Financial Years</div><div class="metric-value" style="color:#2563EB;">{len(u_years)}</div></div>', unsafe_allow_html=True)
+            structures = df_unlisted['structure'].dropna().astype(str).unique() if 'structure' in df_unlisted.columns else []
+            u3.markdown(f'<div class="metric-box"><div class="metric-label">Entity Structures</div><div class="metric-value">{len(structures)}</div></div>', unsafe_allow_html=True)
+            holding_types = df_unlisted['widely_closely_held'].dropna().astype(str).unique() if 'widely_closely_held' in df_unlisted.columns else []
+            u4.markdown(f'<div class="metric-box"><div class="metric-label">Holding Status Types</div><div class="metric-value">{len(holding_types)}</div></div>', unsafe_allow_html=True)
+
+            st.write("")
+            uf1, uf2, uf3, uf4 = st.columns(4)
+            with uf1:
+                u_sel_year = st.multiselect("Year", sorted([str(y) for y in u_years]))
+            with uf2:
+                u_sel_struct = st.multiselect("Structure", sorted([str(s) for s in structures]))
+            with uf3:
+                u_sel_holding = st.multiselect("Widely/Closely Held", sorted([str(h) for h in holding_types]))
+            with uf4:
+                search_entity = st.text_input("🔍 Search Entity Name / Director", "").strip().lower()
+
+            filtered_u = df_unlisted.copy()
+            if u_sel_year:
+                filtered_u = filtered_u[filtered_u['year'].astype(str).isin(u_sel_year)]
+            if u_sel_struct:
+                filtered_u = filtered_u[filtered_u['structure'].astype(str).isin(u_sel_struct)]
+            if u_sel_holding:
+                filtered_u = filtered_u[filtered_u['widely_closely_held'].astype(str).isin(u_sel_holding)]
+            if search_entity:
+                mask = filtered_u.apply(lambda row: search_entity in str(row.values).lower(), axis=1)
+                filtered_u = filtered_u[mask]
+
+            st.markdown(f"Displaying **{len(filtered_u)}** of **{len(df_unlisted)}** stored entity records:")
+            st.dataframe(filtered_u, use_container_width=True)
+        else:
+            st.info("No records currently stored in `unlisted_register`. Go to 'AI & Database Admin Studio' to perform a 1-click cloud sync.")
+
+elif app_mode == "📤 AI & Database Admin Studio":
     st.markdown("""
     <div class="hero-banner">
-        <div class="hero-title">AI Batch Processing Studio</div>
-        <div class="hero-subtitle">Parse, extract, and index GS007/SOC1 reports dynamically</div>
+        <div class="hero-title">Admin Management & Upload Studio</div>
+        <div class="hero-subtitle">Upload PDF reports or sync Excel registers to the permanent cloud database</div>
     </div>
     """, unsafe_allow_html=True)
 
-    with st.expander("🚨 Database Maintenance & Reset Options"):
-        st.warning("⚠️ Action permanently deletes indexed metadata from Firestore and clears uploaded PDF files from Supabase Storage.")
-        if st.button("🗑️ Reset Database & Delete All Records", type="primary"):
-            if db:
-                try:
-                    docs = list(db.collection('type2_reports').stream())
-                    for doc in docs:
-                        doc.reference.delete()
-                    st.info("Cleared Firestore database records.")
-                except Exception as e:
-                    st.error(f"Error purging Firestore: {e}")
-            if supabase:
-                try:
-                    files = supabase.storage.from_("pdfs").list("reports")
-                    file_names = [f["name"] for f in files if "name" in f]
-                    if file_names:
-                        supabase.storage.from_("pdfs").remove([f"reports/{fn}" for fn in file_names])
-                    st.info("Cleared Supabase Storage files.")
-                except Exception as e:
-                    st.error(f"Error purging Supabase Storage: {e}")
-            
-            st.cache_data.clear()
-            st.success("✅ Database and Storage successfully wiped!")
-            st.rerun()
+    admin_tab1, admin_tab2 = st.tabs(["📊 Register Data Cloud Sync", "📄 PDF Batch Uploader"])
 
-    # Dynamic key management for resetting selected uploaded files
-    if "uploader_key" not in st.session_state:
-        st.session_state.uploader_key = 0
+    with admin_tab1:
+        st.subheader("Cloud Register Ingestion")
+        st.caption("Upload your master CSV files to permanently store records in Supabase.")
 
-    col_upload, col_reset = st.columns([5, 1])
+        col_p, col_u = st.columns(2)
 
-    with col_upload:
-        uploaded_files = st.file_uploader(
-            "Select PDF reports", 
-            type=['pdf'], 
-            accept_multiple_files=True,
-            key=f"pdf_uploader_{st.session_state.uploader_key}"
-        )
+        with col_p:
+            st.markdown("#### 🏢 Property Register Sync")
+            prop_file = st.file_uploader("Select `Property Database.csv`", type=["csv"], key="sync_p")
+            if prop_file and st.button("🚀 Sync Property Database to Supabase", type="primary"):
+                if not supabase:
+                    st.error("Supabase connection missing in secrets.")
+                else:
+                    try:
+                        df = pd.read_csv(prop_file, encoding='latin1')
+                        column_mapping = {
+                            'Audit Year End': 'audit_year_end',
+                            'Address of Property': 'address_of_property',
+                            'Suburb': 'suburb',
+                            'State': 'state',
+                            'Type of Property': 'type_of_property',
+                            'Use of Property': 'use_of_property',
+                            'Land Area': 'land_area',
+                            'Measurement': 'measurement',
+                            'Floor Area': 'floor_area',
+                            'MV': 'mv',
+                            'Basis of MV -Appraisal/Valuation/CoreLogic': 'basis_of_mv',
+                            'Date of Appraisal/Valuation': 'date_of_appraisal_valuation',
+                            'Comparable Data': 'comparable_data',
+                            'Transaction during the year': 'transaction_during_year',
+                            'Market Rent per annum': 'market_rent_pa',
+                            'Market Rent per m2': 'market_rent_sqm',
+                            'ROR': 'ror',
+                            'Notes': 'notes'
+                        }
+                        df = df.rename(columns=column_mapping)
+                        df = df.where(pd.notnull(df), None)
+                        records = df.to_dict(orient='records')
 
-    with col_reset:
-        st.write("")
-        st.write("")
-        if st.button("🔄 Clear Files", use_container_width=True):
-            st.session_state.uploader_key += 1
-            st.rerun()
+                        # Batch insert
+                        batch_size = 300
+                        for i in range(0, len(records), batch_size):
+                            batch = records[i:i + batch_size]
+                            supabase.table('property_register').insert(batch).execute()
 
-    submit_btn = st.button("⚡ Process & Index Batch", type="primary", use_container_width=True)
+                        st.cache_data.clear()
+                        st.success(f"✅ Successfully synced {len(records)} Property records to Supabase!")
+                    except Exception as e:
+                        st.error(f"Sync failed: {e}")
 
-    if submit_btn and uploaded_files:
-        if not api_key:
-            st.error("🔑 Please enter your Gemini API Key in the left sidebar.")
-        elif not supabase or not db:
-            st.error("⚠️ Database/Storage connections missing. Check configuration.")
-        else:
-            client = genai.Client(api_key=api_key)
-            
-            active_models = []
-            try:
-                available = client.models.list()
-                for m in available:
-                    m_name = m.name.replace("models/", "")
-                    if "flash" in m_name or "pro" in m_name:
-                        active_models.append(m_name)
-            except Exception:
+        with col_u:
+            st.markdown("#### 📈 Unlisted Entity Register Sync")
+            unlisted_file = st.file_uploader("Select `Unlisted Entity Database.csv`", type=["csv"], key="sync_u")
+            if unlisted_file and st.button("🚀 Sync Unlisted Database to Supabase", type="primary"):
+                if not supabase:
+                    st.error("Supabase connection missing in secrets.")
+                else:
+                    try:
+                        df = pd.read_csv(unlisted_file, encoding='latin1')
+                        if "Unnamed: 12" in df.columns:
+                            df = df.drop(columns=["Unnamed: 12"])
+
+                        column_mapping = {
+                            'Year': 'year',
+                            'Name of Unlisted Entity': 'entity_name',
+                            'Entity FS Year End': 'entity_fs_year_end',
+                            'Structure': 'structure',
+                            'Notes': 'notes',
+                            'Widely/Closely Held': 'widely_closely_held',
+                            'ASIC Search (for Closely Held)': 'asic_search',
+                            'Names of Directors': 'names_of_directors',
+                            'MV per unit': 'mv_per_unit',
+                            'Basis of valuation (NTA, capital raising, director assessment etc)': 'basis_of_valuation',
+                            'Audit conclusion (ACR, other matter, qualfied part A, B)': 'audit_conclusion',
+                            'Note/Links': 'note_links'
+                        }
+                        df = df.rename(columns=column_mapping)
+                        df = df.where(pd.notnull(df), None)
+                        records = df.to_dict(orient='records')
+
+                        supabase.table('unlisted_register').insert(records).execute()
+                        st.cache_data.clear()
+                        st.success(f"✅ Successfully synced {len(records)} Unlisted Entity records to Supabase!")
+                    except Exception as e:
+                        st.error(f"Sync failed: {e}")
+
+    with admin_tab2:
+        with st.expander("🚨 Database Maintenance & Reset Options"):
+            st.warning("⚠️ Permanently delete indexed PDF metadata from Firestore and files from Supabase Storage.")
+            if st.button("🗑️ Reset PDF Records", type="primary"):
+                if db:
+                    try:
+                        docs = list(db.collection('type2_reports').stream())
+                        for doc in docs:
+                            doc.reference.delete()
+                        st.info("Cleared Firestore database records.")
+                    except Exception as e:
+                        st.error(f"Error purging Firestore: {e}")
+                if supabase:
+                    try:
+                        files = supabase.storage.from_("pdfs").list("reports")
+                        file_names = [f["name"] for f in files if "name" in f]
+                        if file_names:
+                            supabase.storage.from_("pdfs").remove([f"reports/{fn}" for fn in file_names])
+                        st.info("Cleared Supabase Storage files.")
+                    except Exception as e:
+                        st.error(f"Error purging Supabase Storage: {e}")
+                
+                st.cache_data.clear()
+                st.success("✅ PDF records wiped!")
+                st.rerun()
+
+        if "uploader_key" not in st.session_state:
+            st.session_state.uploader_key = 0
+
+        col_upload, col_reset = st.columns([5, 1])
+        with col_upload:
+            uploaded_files = st.file_uploader(
+                "Select PDF reports", 
+                type=['pdf'], 
+                accept_multiple_files=True,
+                key=f"pdf_uploader_{st.session_state.uploader_key}"
+            )
+
+        with col_reset:
+            st.write("")
+            st.write("")
+            if st.button("🔄 Clear Files", use_container_width=True):
+                st.session_state.uploader_key += 1
+                st.rerun()
+
+        submit_btn = st.button("⚡ Process & Index Batch", type="primary", use_container_width=True)
+
+        if submit_btn and uploaded_files:
+            if not api_key:
+                st.error("🔑 Please enter your Gemini API Key in the left sidebar.")
+            elif not supabase or not db:
+                st.error("⚠️ Database/Storage connections missing.")
+            else:
+                client = genai.Client(api_key=api_key)
                 active_models = ["gemini-2.5-flash", "gemini-1.5-flash"]
+                progress = st.progress(0)
+                existing_docs = [d.to_dict() for d in db.collection('type2_reports').stream()]
+                
+                for idx, file in enumerate(uploaded_files):
+                    st.info(f"Processing [{idx+1}/{len(uploaded_files)}]: {file.name}...")
+                    raw_bytes = file.getvalue()
+                    tmp_path = None
 
-            st.caption(f"🤖 Dynamic Model Pool Active: `{', '.join(active_models[:3])}`")
-            progress = st.progress(0)
-            
-            existing_docs = [d.to_dict() for d in db.collection('type2_reports').stream()]
-            
-            for idx, file in enumerate(uploaded_files):
-                st.info(f"Processing [{idx+1}/{len(uploaded_files)}]: {file.name}...")
+                    try:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                            tmp.write(raw_bytes)
+                            tmp_path = tmp.name
 
-                raw_bytes = file.getvalue()
-                tmp_path = None
+                        g_file = client.files.upload(file=tmp_path, config={"mime_type": "application/pdf"})
+                        prompt = """
+                        Analyze the internal text of this audit report carefully and extract details into JSON:
+                        {
+                            "platform_name": "Primary Platform Name",
+                            "document_type": "GS007 Report, SOC 1 Report, SOC 3 Report, or Bridge Letter",
+                            "date_coverage_period": "e.g. 1 July 2022 - 30 June 2023",
+                            "financial_year": "Original report year e.g. FY2023",
+                            "aus_financial_year": "Corresponding Australian Financial Year e.g. FY2023",
+                            "doc_role": "Role e.g., 'Primary Control Report'",
+                            "auditing_firm": "Auditor Name",
+                            "audit_opinion": "Unqualified or Qualified",
+                            "key_exceptions_summary": "Summary of exceptions or 'None flagged'"
+                        }
+                        """
+                        res = None
+                        for m_name in active_models:
+                            try:
+                                res = client.models.generate_content(
+                                    model=m_name, contents=[g_file, prompt],
+                                    config={"response_mime_type": "application/json", "temperature": 0.1}
+                                )
+                                if res and res.text:
+                                    break
+                            except Exception:
+                                continue
 
-                try:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                        tmp.write(raw_bytes)
-                        tmp_path = tmp.name
+                        if res and res.text:
+                            metadata = robust_json_decode(res.text)
+                            if metadata:
+                                safe_filename = file.name.replace(" ", "_")
+                                s_path = f"reports/{safe_filename}"
+                                supabase.storage.from_("pdfs").upload(s_path, raw_bytes, {"content-type": "application/pdf", "x-upsert": "true"})
+                                pub_url = supabase.storage.from_("pdfs").get_public_url(s_path)
+                                
+                                metadata["source_filename"] = file.name
+                                metadata["download_url"] = pub_url
+                                metadata["created_at"] = time.time()
+                                
+                                db.collection('type2_reports').add(metadata)
+                                st.success(f"Indexed: `{file.name}` -> **{metadata.get('platform_name')}**")
+                    except Exception as e:
+                        st.error(f"Error handling {file.name}: {e}")
+                    finally:
+                        if tmp_path and os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    progress.progress((idx + 1) / len(uploaded_files))
 
-                    g_file = client.files.upload(file=tmp_path, config={"mime_type": "application/pdf"})
-                    
-                    prompt = """
-                    Analyze the internal text of this audit report carefully and extract the details into valid JSON with these exact keys:
-                    {
-                        "platform_name": "Primary Platform Name (e.g. Morgans, Interactive Brokers, DNR AFSL Pty Ltd)",
-                        "document_type": "GS007 Report, SOC 1 Report, SOC 3 Report, or Bridge Letter",
-                        "date_coverage_period": "Exact period tested inside the text e.g. 1 July 2022 - 30 June 2023 or 1 July 2023 - 30 June 2024",
-                        "financial_year": "Original report year e.g. FY2023 or FY2024",
-                        "aus_financial_year": "Corresponding Australian Financial Year based strictly on the period tested e.g., period ending 30 June 2023 is FY2023, period ending 30 June 2024 is FY2024",
-                        "doc_role": "Role e.g., 'Primary Control Report', 'Primary SOC Report (Part 1)', or 'Gap/Bridge Letter'",
-                        "auditing_firm": "e.g. PwC, Deloitte, KPMG, EY, PKF Brisbane Audit",
-                        "audit_opinion": "Unqualified or Qualified",
-                        "key_exceptions_summary": "Summary of exceptions or 'None flagged'"
-                    }
-                    Note: Determine the financial year (aus_financial_year) strictly from the testing period written inside the report body, NOT from external file naming.
-                    """
-                    
-                    res = None
-                    last_err = None
-                    
-                    for m_name in active_models:
-                        try:
-                            res = client.models.generate_content(
-                                model=m_name, 
-                                contents=[g_file, prompt],
-                                config={"response_mime_type": "application/json", "temperature": 0.1}
-                            )
-                            if res and res.text:
-                                break
-                        except Exception as m_err:
-                            last_err = m_err
-                            if "429" in str(m_err) or "RESOURCE_EXHAUSTED" in str(m_err):
-                                time.sleep(5)
-                            continue
-
-                    if not res or not res.text:
-                        st.error(f"Failed to process {file.name}. Details: {last_err}")
-                        continue
-                    
-                    metadata = robust_json_decode(res.text)
-                    
-                    if metadata:
-                        extracted_platform = str(metadata.get('platform_name', '')).strip().lower()
-                        extracted_fy = str(metadata.get('aus_financial_year', metadata.get('financial_year', ''))).strip().upper()
-                        extracted_role = str(metadata.get('doc_role', '')).strip().lower()
-                        extracted_period = str(metadata.get('date_coverage_period', '')).strip().lower()
-
-                        # Check if duplicate record exists for Platform + FY + Coverage Period + Doc Role
-                        param_duplicate = False
-                        for doc in existing_docs:
-                            d_plat = str(doc.get('platform_name', '')).strip().lower()
-                            d_fy = str(doc.get('aus_financial_year', doc.get('financial_year', ''))).strip().upper()
-                            d_role = str(doc.get('doc_role', '')).strip().lower()
-                            d_period = str(doc.get('date_coverage_period', '')).strip().lower()
-                            
-                            if d_plat == extracted_platform and d_fy == extracted_fy and d_role == extracted_role and d_period == extracted_period:
-                                param_duplicate = True
-                                break
-
-                        if param_duplicate:
-                            st.warning(f"⚠️ **Skipped**: Record for `{metadata.get('platform_name')}`, FY `{extracted_fy}` ({metadata.get('date_coverage_period')}) already exists.")
-                            progress.progress((idx + 1) / len(uploaded_files))
-                            continue
-
-                        # Ensure safe Supabase filename storage
-                        safe_filename = file.name.replace(" ", "_")
-                        s_path = f"reports/{safe_filename}"
-                        supabase.storage.from_("pdfs").upload(s_path, raw_bytes, {"content-type": "application/pdf", "x-upsert": "true"})
-                        pub_url = supabase.storage.from_("pdfs").get_public_url(s_path)
-                        
-                        metadata["source_filename"] = file.name
-                        metadata["download_url"] = pub_url
-                        metadata["created_at"] = time.time()
-                        
-                        db.collection('type2_reports').add(metadata)
-                        existing_docs.append(metadata)
-                        st.success(f" Indexed: `{file.name}` -> **{metadata.get('platform_name')}** ({metadata.get('aus_financial_year')} - {metadata.get('date_coverage_period')})")
-                    else:
-                        st.error(f"Malformed JSON response for {file.name}")
-                        
-                except Exception as e:
-                    st.error(f"Error handling {file.name}: {e}")
-                finally:
-                    if tmp_path and os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                    
-                progress.progress((idx + 1) / len(uploaded_files))
-            
-            st.cache_data.clear()
-            st.success("Batch indexing complete!")
+                st.cache_data.clear()
+                st.success("Batch processing complete!")
