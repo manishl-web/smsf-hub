@@ -1,3 +1,121 @@
+import os
+import json
+import re
+import time
+import tempfile
+import ast
+import streamlit as st
+import pandas as pd
+import google.cloud.firestore as firestore
+from google import genai
+from supabase import create_client
+
+st.set_page_config(
+    page_title="SMSF Audit Hub | Enterprise Portal",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+    html, body, [class*="css"] { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #F8FAFC; }
+    .hero-banner { background: linear-gradient(135deg, #0F172A 0%, #1E293B 50%, #1E40AF 100%); padding: 2.2rem 2rem; border-radius: 20px; color: white; margin-bottom: 1.5rem; }
+    .hero-title { font-size: 2.2rem; font-weight: 800; margin-bottom: 0.2rem; }
+    .hero-subtitle { font-size: 0.95rem; color: #94A3B8; font-weight: 400; }
+    .glass-card { background: rgba(255, 255, 255, 0.95); border: 1px solid #E2E8F0; border-radius: 16px; padding: 1.5rem; margin-bottom: 1.25rem; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.03); }
+    .metric-box { background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 14px; padding: 1.25rem; text-align: left; }
+    .metric-value { font-size: 2.1rem; font-weight: 800; color: #0F172A; }
+    .metric-label { font-size: 0.8rem; font-weight: 600; color: #64748B; text-transform: uppercase; }
+    .badge-unqualified { background: #DCFCE7; color: #15803D; font-size: 0.75rem; font-weight: 700; padding: 4px 12px; border-radius: 30px; border: 1px solid #86EFAC; }
+    .badge-qualified { background: #FEE2E2; color: #B91C1C; font-size: 0.75rem; font-weight: 700; padding: 4px 12px; border-radius: 30px; border: 1px solid #FCA5A5; }
+    .sub-doc-pill { background: #F1F5F9; border: 1px solid #CBD5E1; border-radius: 8px; padding: 8px 12px; margin-top: 6px; font-size: 0.82rem; }
+</style>
+""", unsafe_allow_html=True)
+
+def robust_json_decode(raw_text):
+    if not raw_text:
+        return None
+    clean_text = raw_text.strip()
+    clean_text = re.sub(r'^```json\s*', '', clean_text, flags=re.MULTILINE)
+    clean_text = re.sub(r'^```\s*', '', clean_text, flags=re.MULTILINE)
+    clean_text = re.sub(r'```$', '', clean_text, flags=re.MULTILINE).strip()
+    
+    match = re.search(r'\{.*\}', clean_text, re.DOTALL)
+    if not match:
+        return None
+    
+    json_str = match.group(0)
+    
+    # 1. Standard JSON Parse
+    try:
+        return json.loads(json_str)
+    except Exception:
+        pass
+
+    # 2. Clean Trailing Commas
+    json_str_clean = re.sub(r',\s*([}\]])', r'\1', json_str)
+    try:
+        return json.loads(json_str_clean)
+    except Exception:
+        pass
+
+    # 3. Python AST Literal Eval Fallback
+    try:
+        py_str = json_str_clean.replace("true", "True").replace("false", "False").replace("null", "None")
+        res = ast.literal_eval(py_str)
+        if isinstance(res, dict):
+            return res
+    except Exception:
+        pass
+
+    return None
+
+@st.cache_resource
+def init_services():
+    db = None
+    if "gcp_service_account" in st.secrets and "textkey" in st.secrets["gcp_service_account"]:
+        try:
+            cred_dict = json.loads(st.secrets["gcp_service_account"]["textkey"])
+            db = firestore.Client.from_service_account_info(cred_dict)
+        except Exception as e:
+            st.sidebar.error(f"Firestore Auth Error: {e}")
+
+    supabase = None
+    sb_url = st.secrets.get("SUPABASE_URL", "")
+    sb_key = st.secrets.get("SUPABASE_KEY", "")
+    if sb_url and sb_key:
+        try:
+            supabase = create_client(sb_url, sb_key)
+        except Exception as e:
+            st.sidebar.error(f"Supabase Auth Error: {e}")
+
+    return db, supabase
+
+db, supabase = init_services()
+
+if db:
+    st.sidebar.markdown('🌐 <span style="color:#166534; font-weight:700;">Firestore Connected</span>', unsafe_allow_html=True)
+else:
+    st.sidebar.warning("⚠️ Firestore Offline")
+
+if supabase:
+    st.sidebar.markdown('⚡ <span style="color:#166534; font-weight:700;">Supabase Storage Connected</span>', unsafe_allow_html=True)
+else:
+    st.sidebar.warning("⚠️ Supabase Offline")
+
+@st.cache_data(ttl=300)
+def fetch_reports():
+    if not db:
+        return []
+    docs = list(db.collection('type2_reports').stream())
+    return [d.to_dict() for d in docs]
+
+st.sidebar.title("🛡️ Audit Portal")
+app_mode = st.sidebar.radio("Navigate", ["🔍 Search & Analytics Hub", "📤 AI Batch Upload Studio"])
+api_key = st.sidebar.text_input("Gemini API Key", type="password", value=st.secrets.get("GEMINI_API_KEY", ""))
+
 if app_mode == "🔍 Search & Analytics Hub":
     st.markdown("""
     <div class="hero-banner">
@@ -18,9 +136,7 @@ if app_mode == "🔍 Search & Analytics Hub":
     m4.markdown(f'<div class="metric-box"><div class="metric-label">FY2025 Reports</div><div class="metric-value" style="color:#2563EB;">{fy25}</div></div>', unsafe_allow_html=True)
 
     st.write("")
-    
-    # Filter Controls
-    fcol1, fcol2, fcol3, fcol4 = st.columns([2, 1, 1, 1])
+    fcol1, fcol2, fcol3 = st.columns([2, 1, 1])
     with fcol1:
         q = st.text_input("🔍 Keyword Search (Platform, Auditor, Exceptions)", "").strip().lower()
     with fcol2:
@@ -28,10 +144,9 @@ if app_mode == "🔍 Search & Analytics Hub":
         fy_sel = st.selectbox("Financial Year", fy_options)
     with fcol3:
         status_sel = st.selectbox("Audit Status Filter", ["All Reports", "Qualified Only", "Unqualified Only"])
-    with fcol4:
-        sort_order = st.selectbox("Sort Alphabetically", ["A-Z (Ascending)", "Z-A (Descending)"])
 
-    # Filtering logic
+    st.divider()
+
     filtered = []
     for r in reports:
         search_blob = f"{r.get('platform_name', '')} {r.get('auditing_firm', '')} {r.get('audit_opinion', '')} {r.get('key_exceptions_summary', '')}".lower()
@@ -50,7 +165,6 @@ if app_mode == "🔍 Search & Analytics Hub":
         if matches_search and matches_fy and matches_status:
             filtered.append(r)
 
-    # Group reports by Platform + Financial Year
     grouped_reports = {}
     for r in filtered:
         group_key = f"{r.get('platform_name', 'Unknown Platform')} - {r.get('aus_financial_year', r.get('financial_year', 'FY2025'))}"
@@ -58,34 +172,9 @@ if app_mode == "🔍 Search & Analytics Hub":
             grouped_reports[group_key] = []
         grouped_reports[group_key].append(r)
 
-    # Sort groups alphabetically by Platform Name
-    reverse_sort = (sort_order == "Z-A (Descending)")
-    sorted_group_keys = sorted(
-        grouped_reports.keys(),
-        key=lambda x: x.lower(),
-        reverse=reverse_sort
-    )
+    st.markdown(f"Showing **{len(grouped_reports)}** Compliance Packages ({len(filtered)} total documents):")
 
-    # Alphabetical Letter Quick Filter Bar
-    st.write("")
-    st.markdown("<b>🔤 Quick Alphabet Filter:</b>", unsafe_allow_html=True)
-    letters = ["ALL"] + list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-    selected_letter = st.radio("A-Z Bar", letters, horizontal=True, label_visibility="collapsed")
-
-    # Filter by selected letter
-    if selected_letter != "ALL":
-        sorted_group_keys = [
-            k for k in sorted_group_keys 
-            if k.strip().upper().startswith(selected_letter)
-        ]
-
-    st.divider()
-
-    st.markdown(f"Showing **{len(sorted_group_keys)}** Compliance Packages ({len(filtered)} total documents):")
-
-    # Render sorted and categorized cards
-    for group_key in sorted_group_keys:
-        doc_list = grouped_reports[group_key]
+    for group_key, doc_list in grouped_reports.items():
         primary_doc = doc_list[0]
         platform_name = primary_doc.get('platform_name', 'Unknown Platform')
         aus_fy = primary_doc.get('aus_financial_year', primary_doc.get('financial_year', 'FY2025'))
@@ -123,3 +212,185 @@ if app_mode == "🔍 Search & Analytics Hub":
                     st.link_button("📥 Download", d['download_url'])
         
         st.markdown("</div>", unsafe_allow_html=True)
+
+elif app_mode == "📤 AI Batch Upload Studio":
+    st.markdown("""
+    <div class="hero-banner">
+        <div class="hero-title">AI Batch Processing Studio</div>
+        <div class="hero-subtitle">Parse, extract, and index GS007/SOC1 reports dynamically</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.expander("🚨 Database Maintenance & Reset Options"):
+        st.warning("⚠️ Action permanently deletes indexed metadata from Firestore and clears uploaded PDF files from Supabase Storage.")
+        if st.button("🗑️ Reset Database & Delete All Records", type="primary"):
+            if db:
+                try:
+                    docs = list(db.collection('type2_reports').stream())
+                    for doc in docs:
+                        doc.reference.delete()
+                    st.info("Cleared Firestore database records.")
+                except Exception as e:
+                    st.error(f"Error purging Firestore: {e}")
+            if supabase:
+                try:
+                    files = supabase.storage.from_("pdfs").list("reports")
+                    file_names = [f["name"] for f in files if "name" in f]
+                    if file_names:
+                        supabase.storage.from_("pdfs").remove([f"reports/{fn}" for fn in file_names])
+                    st.info("Cleared Supabase Storage files.")
+                except Exception as e:
+                    st.error(f"Error purging Supabase Storage: {e}")
+            
+            st.cache_data.clear()
+            st.success("✅ Database and Storage successfully wiped!")
+            st.rerun()
+
+    # Dynamic key management for resetting selected uploaded files
+    if "uploader_key" not in st.session_state:
+        st.session_state.uploader_key = 0
+
+    col_upload, col_reset = st.columns([5, 1])
+
+    with col_upload:
+        uploaded_files = st.file_uploader(
+            "Select PDF reports", 
+            type=['pdf'], 
+            accept_multiple_files=True,
+            key=f"pdf_uploader_{st.session_state.uploader_key}"
+        )
+
+    with col_reset:
+        st.write("")
+        st.write("")
+        if st.button("🔄 Clear Files", use_container_width=True):
+            st.session_state.uploader_key += 1
+            st.rerun()
+
+    submit_btn = st.button("⚡ Process & Index Batch", type="primary", use_container_width=True)
+
+    if submit_btn and uploaded_files:
+        if not api_key:
+            st.error("🔑 Please enter your Gemini API Key in the left sidebar.")
+        elif not supabase or not db:
+            st.error("⚠️ Database/Storage connections missing. Check configuration.")
+        else:
+            client = genai.Client(api_key=api_key)
+            
+            active_models = []
+            try:
+                available = client.models.list()
+                for m in available:
+                    m_name = m.name.replace("models/", "")
+                    if "flash" in m_name or "pro" in m_name:
+                        active_models.append(m_name)
+            except Exception:
+                active_models = ["gemini-2.5-flash", "gemini-1.5-flash"]
+
+            st.caption(f"🤖 Dynamic Model Pool Active: `{', '.join(active_models[:3])}`")
+            progress = st.progress(0)
+            
+            existing_docs = [d.to_dict() for d in db.collection('type2_reports').stream()]
+            
+            for idx, file in enumerate(uploaded_files):
+                st.info(f"Processing [{idx+1}/{len(uploaded_files)}]: {file.name}...")
+
+                raw_bytes = file.getvalue()
+                tmp_path = None
+
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                        tmp.write(raw_bytes)
+                        tmp_path = tmp.name
+
+                    g_file = client.files.upload(file=tmp_path, config={"mime_type": "application/pdf"})
+                    
+                    prompt = """
+                    Analyze the internal text of this audit report carefully and extract the details into valid JSON with these exact keys:
+                    {
+                        "platform_name": "Primary Platform Name (e.g. Morgans, Interactive Brokers, DNR AFSL Pty Ltd)",
+                        "document_type": "GS007 Report, SOC 1 Report, SOC 3 Report, or Bridge Letter",
+                        "date_coverage_period": "Exact period tested inside the text e.g. 1 July 2022 - 30 June 2023 or 1 July 2023 - 30 June 2024",
+                        "financial_year": "Original report year e.g. FY2023 or FY2024",
+                        "aus_financial_year": "Corresponding Australian Financial Year based strictly on the period tested e.g., period ending 30 June 2023 is FY2023, period ending 30 June 2024 is FY2024",
+                        "doc_role": "Role e.g., 'Primary Control Report', 'Primary SOC Report (Part 1)', or 'Gap/Bridge Letter'",
+                        "auditing_firm": "e.g. PwC, Deloitte, KPMG, EY, PKF Brisbane Audit",
+                        "audit_opinion": "Unqualified or Qualified",
+                        "key_exceptions_summary": "Summary of exceptions or 'None flagged'"
+                    }
+                    Note: Determine the financial year (aus_financial_year) strictly from the testing period written inside the report body, NOT from external file naming.
+                    """
+                    
+                    res = None
+                    last_err = None
+                    
+                    for m_name in active_models:
+                        try:
+                            res = client.models.generate_content(
+                                model=m_name, 
+                                contents=[g_file, prompt],
+                                config={"response_mime_type": "application/json", "temperature": 0.1}
+                            )
+                            if res and res.text:
+                                break
+                        except Exception as m_err:
+                            last_err = m_err
+                            if "429" in str(m_err) or "RESOURCE_EXHAUSTED" in str(m_err):
+                                time.sleep(5)
+                            continue
+
+                    if not res or not res.text:
+                        st.error(f"Failed to process {file.name}. Details: {last_err}")
+                        continue
+                    
+                    metadata = robust_json_decode(res.text)
+                    
+                    if metadata:
+                        extracted_platform = str(metadata.get('platform_name', '')).strip().lower()
+                        extracted_fy = str(metadata.get('aus_financial_year', metadata.get('financial_year', ''))).strip().upper()
+                        extracted_role = str(metadata.get('doc_role', '')).strip().lower()
+                        extracted_period = str(metadata.get('date_coverage_period', '')).strip().lower()
+
+                        # Check if duplicate record exists for Platform + FY + Coverage Period + Doc Role
+                        param_duplicate = False
+                        for doc in existing_docs:
+                            d_plat = str(doc.get('platform_name', '')).strip().lower()
+                            d_fy = str(doc.get('aus_financial_year', doc.get('financial_year', ''))).strip().upper()
+                            d_role = str(doc.get('doc_role', '')).strip().lower()
+                            d_period = str(doc.get('date_coverage_period', '')).strip().lower()
+                            
+                            if d_plat == extracted_platform and d_fy == extracted_fy and d_role == extracted_role and d_period == extracted_period:
+                                param_duplicate = True
+                                break
+
+                        if param_duplicate:
+                            st.warning(f"⚠️ **Skipped**: Record for `{metadata.get('platform_name')}`, FY `{extracted_fy}` ({metadata.get('date_coverage_period')}) already exists.")
+                            progress.progress((idx + 1) / len(uploaded_files))
+                            continue
+
+                        # Ensure safe Supabase filename storage
+                        safe_filename = file.name.replace(" ", "_")
+                        s_path = f"reports/{safe_filename}"
+                        supabase.storage.from_("pdfs").upload(s_path, raw_bytes, {"content-type": "application/pdf", "x-upsert": "true"})
+                        pub_url = supabase.storage.from_("pdfs").get_public_url(s_path)
+                        
+                        metadata["source_filename"] = file.name
+                        metadata["download_url"] = pub_url
+                        metadata["created_at"] = time.time()
+                        
+                        db.collection('type2_reports').add(metadata)
+                        existing_docs.append(metadata)
+                        st.success(f" Indexed: `{file.name}` -> **{metadata.get('platform_name')}** ({metadata.get('aus_financial_year')} - {metadata.get('date_coverage_period')})")
+                    else:
+                        st.error(f"Malformed JSON response for {file.name}")
+                        
+                except Exception as e:
+                    st.error(f"Error handling {file.name}: {e}")
+                finally:
+                    if tmp_path and os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                    
+                progress.progress((idx + 1) / len(uploaded_files))
+            
+            st.cache_data.clear()
+            st.success("Batch indexing complete!")
