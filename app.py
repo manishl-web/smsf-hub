@@ -109,7 +109,9 @@ def robust_json_decode(text):
 # ---------------- NAVIGATION SIDEBAR ----------------
 st.sidebar.title("🛡️ Audit Portal")
 app_mode = st.sidebar.radio("Navigate", ["🔍 Search & Analytics Hub", "📤 AI & Database Admin Studio"])
-api_key = st.sidebar.text_input("Gemini API Key", type="password", value=st.secrets.get("GEMINI_API_KEY", ""))
+
+# Securely pull API Key from backend secrets
+api_key = st.secrets.get("GEMINI_API_KEY", "")
 
 
 # ---------------- MODE 1: SEARCH & ANALYTICS HUB ----------------
@@ -269,7 +271,7 @@ if app_mode == "🔍 Search & Analytics Hub":
             st.markdown(f"Displaying **{len(filtered_p)}** of **{len(df_prop)}** stored property records:")
             st.dataframe(filtered_p, use_container_width=True)
         else:
-            st.info("No records currently stored in `property_register`. Go to 'AI & Database Admin Studio' to perform a 1-click cloud sync.")
+            st.info("No records currently stored in `property_register`. Go to 'AI & Database Admin Studio' to perform a cloud sync.")
 
     # --- TAB 3: UNLISTED REGISTER ---
     with tab3:
@@ -317,7 +319,7 @@ if app_mode == "🔍 Search & Analytics Hub":
             st.markdown(f"Displaying **{len(filtered_u)}** of **{len(df_unlisted)}** stored entity records:")
             st.dataframe(filtered_u, use_container_width=True)
         else:
-            st.info("No records currently stored in `unlisted_register`. Go to 'AI & Database Admin Studio' to perform a 1-click cloud sync.")
+            st.info("No records currently stored in `unlisted_register`. Go to 'AI & Database Admin Studio' to perform a cloud sync.")
 
 
 # ---------------- MODE 2: ADMIN & UPLOAD STUDIO ----------------
@@ -342,6 +344,8 @@ elif app_mode == "📤 AI & Database Admin Studio":
         with col_p:
             st.markdown("#### 🏢 Property Register Sync")
             prop_file = st.file_uploader("Select `Property Database.csv`", type=["csv"], key="sync_p")
+            overwrite_prop = st.checkbox("Clear existing property database before upload", value=False, key="overwrite_p")
+            
             if prop_file and st.button("🚀 Sync Property Database to Supabase", type="primary"):
                 if not supabase:
                     st.error("Supabase connection missing in secrets.")
@@ -370,12 +374,13 @@ elif app_mode == "📤 AI & Database Admin Studio":
                         }
                         df = df.rename(columns=column_mapping)
                         
-                        # Fix NaN & Out-of-Range Inf Errors for JSON Compliance
                         df = df.replace([np.inf, -np.inf], None)
                         df = df.astype(object).where(pd.notnull(df), None)
                         records = df.to_dict(orient='records')
 
-                        # Batch insert
+                        if overwrite_prop:
+                            supabase.table('property_register').delete().neq('id', 0).execute()
+
                         batch_size = 300
                         for i in range(0, len(records), batch_size):
                             batch = records[i:i + batch_size]
@@ -390,6 +395,8 @@ elif app_mode == "📤 AI & Database Admin Studio":
         with col_u:
             st.markdown("#### 📈 Unlisted Entity Register Sync")
             unlisted_file = st.file_uploader("Select `Unlisted Entity Database.csv`", type=["csv"], key="sync_u")
+            overwrite_unlisted = st.checkbox("Clear existing unlisted database before upload", value=False, key="overwrite_u")
+            
             if unlisted_file and st.button("🚀 Sync Unlisted Database to Supabase", type="primary"):
                 if not supabase:
                     st.error("Supabase connection missing in secrets.")
@@ -415,44 +422,34 @@ elif app_mode == "📤 AI & Database Admin Studio":
                         }
                         df = df.rename(columns=column_mapping)
                         
-                        # Fix NaN & Out-of-Range Inf Errors for JSON Compliance
+                        # Clean leading/trailing spaces
+                        if 'entity_name' in df.columns:
+                            df['entity_name'] = df['entity_name'].astype(str).str.strip()
+                        if 'year' in df.columns:
+                            df['year'] = df['year'].astype(str).str.strip()
+
+                        # Remove internal duplicates from CSV
+                        initial_count = len(df)
+                        df = df.drop_duplicates(subset=['entity_name', 'year'], keep='last')
+                        deduped_count = len(df)
+
                         df = df.replace([np.inf, -np.inf], None)
                         df = df.astype(object).where(pd.notnull(df), None)
                         records = df.to_dict(orient='records')
 
+                        if overwrite_unlisted:
+                            supabase.table('unlisted_register').delete().neq('id', 0).execute()
+
                         supabase.table('unlisted_register').insert(records).execute()
                         st.cache_data.clear()
-                        st.success(f"✅ Successfully synced {len(records)} Unlisted Entity records to Supabase!")
+                        
+                        removed_dupes = initial_count - deduped_count
+                        st.success(f"✅ Successfully synced {deduped_count} Unlisted Entity records! ({removed_dupes} duplicates removed)")
                     except Exception as e:
                         st.error(f"Sync failed: {e}")
 
     # --- ADMIN TAB 2: PDF UPLOADER ---
     with admin_tab2:
-        with st.expander("🚨 Database Maintenance & Reset Options"):
-            st.warning("⚠️ Permanently delete indexed PDF metadata from Firestore and files from Supabase Storage.")
-            if st.button("🗑️ Reset PDF Records", type="primary"):
-                if db:
-                    try:
-                        docs = list(db.collection('type2_reports').stream())
-                        for doc in docs:
-                            doc.reference.delete()
-                        st.info("Cleared Firestore database records.")
-                    except Exception as e:
-                        st.error(f"Error purging Firestore: {e}")
-                if supabase:
-                    try:
-                        files = supabase.storage.from_("pdfs").list("reports")
-                        file_names = [f["name"] for f in files if "name" in f]
-                        if file_names:
-                            supabase.storage.from_("pdfs").remove([f"reports/{fn}" for fn in file_names])
-                        st.info("Cleared Supabase Storage files.")
-                    except Exception as e:
-                        st.error(f"Error purging Supabase Storage: {e}")
-                
-                st.cache_data.clear()
-                st.success("✅ PDF records wiped!")
-                st.rerun()
-
         if "uploader_key" not in st.session_state:
             st.session_state.uploader_key = 0
 
@@ -476,7 +473,7 @@ elif app_mode == "📤 AI & Database Admin Studio":
 
         if submit_btn and uploaded_files:
             if not api_key:
-                st.error("🔑 Please enter your Gemini API Key in the left sidebar.")
+                st.error("🔑 API Key missing from configuration (`st.secrets`). Please verify settings.")
             elif not supabase or not db:
                 st.error("⚠️ Database/Storage connections missing.")
             else:
