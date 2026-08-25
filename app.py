@@ -46,7 +46,8 @@ def init_services():
         try:
             cred_dict = json.loads(st.secrets["gcp_service_account"]["textkey"])
             project_id = cred_dict.get("project_id")
-            # Explicit credentials object prevents default db encoding bug & startup hangs
+            
+            # Explicitly load OAuth2 credentials object to stop gRPC from encoding (default) into %28default%29
             credentials = service_account.Credentials.from_service_account_info(cred_dict)
             db = firestore.Client(project=project_id, credentials=credentials)
         except Exception as e:
@@ -72,9 +73,9 @@ def fetch_reports():
     if not db:
         return []
     try:
-        # Fetch directly without generator hanging
-        docs = db.collection('type2_reports').get(timeout=10)
-        return [d.to_dict() for d in docs]
+        # Standard collection query without URL encoding side-effects
+        docs = db.collection('type2_reports').get()
+        return [d.to_dict() for d in docs if d.exists]
     except Exception as e:
         st.error(f"Error loading compliance reports: {e}")
         return []
