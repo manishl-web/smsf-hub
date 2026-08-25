@@ -8,6 +8,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import google.cloud.firestore as firestore
+from google.oauth2 import service_account
 from google import genai
 from supabase import create_client
 
@@ -38,19 +39,16 @@ st.markdown("""
 
 
 # ---------------- INITIALIZE CONNECTIONS ----------------
-@st.cache_resource
+@st.cache_resource(ttl=600)
 def init_services():
     db = None
     if "gcp_service_account" in st.secrets and "textkey" in st.secrets["gcp_service_account"]:
         try:
             cred_dict = json.loads(st.secrets["gcp_service_account"]["textkey"])
             project_id = cred_dict.get("project_id")
-            # Passing database=None prevents client SDK from encoding default db to '%28default%29'
-            db = firestore.Client.from_service_account_info(
-                cred_dict, 
-                project=project_id,
-                database=None
-            )
+            # Explicit credentials object prevents default db encoding bug & startup hangs
+            credentials = service_account.Credentials.from_service_account_info(cred_dict)
+            db = firestore.Client(project=project_id, credentials=credentials)
         except Exception as e:
             st.sidebar.error(f"Firestore Auth Error: {e}")
 
@@ -74,7 +72,8 @@ def fetch_reports():
     if not db:
         return []
     try:
-        docs = list(db.collection('type2_reports').stream())
+        # Fetch directly without generator hanging
+        docs = db.collection('type2_reports').get(timeout=10)
         return [d.to_dict() for d in docs]
     except Exception as e:
         st.error(f"Error loading compliance reports: {e}")
@@ -120,7 +119,6 @@ def robust_json_decode(text):
 st.sidebar.title("🛡️ Audit Portal")
 app_mode = st.sidebar.radio("Navigate", ["🔍 Search & Analytics Hub", "📤 AI & Database Admin Studio"])
 
-# Pull Gemini API Key securely from secrets
 api_key = st.secrets.get("GEMINI_API_KEY", "")
 
 
