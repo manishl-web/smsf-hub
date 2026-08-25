@@ -45,8 +45,12 @@ def init_services():
         try:
             cred_dict = json.loads(st.secrets["gcp_service_account"]["textkey"])
             project_id = cred_dict.get("project_id")
-            # Explicitly set project_id to fix InvalidArgument RPC exception
-            db = firestore.Client.from_service_account_info(cred_dict, project=project_id)
+            # Explicitly pass project and database='(default)' to prevent URL encoding errors (%28default%29)
+            db = firestore.Client.from_service_account_info(
+                cred_dict, 
+                project=project_id,
+                database='(default)'
+            )
         except Exception as e:
             st.sidebar.error(f"Firestore Auth Error: {e}")
 
@@ -428,13 +432,11 @@ elif app_mode == "📤 AI & Database Admin Studio":
                         }
                         df = df.rename(columns=column_mapping)
                         
-                        # Clean leading/trailing spaces
                         if 'entity_name' in df.columns:
                             df['entity_name'] = df['entity_name'].astype(str).str.strip()
                         if 'year' in df.columns:
                             df['year'] = df['year'].astype(str).str.strip()
 
-                        # Deduplicate internally before upload
                         initial_count = len(df)
                         df = df.drop_duplicates(subset=['entity_name', 'year'], keep='last')
                         deduped_count = len(df)
