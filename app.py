@@ -45,11 +45,11 @@ def init_services():
         try:
             cred_dict = json.loads(st.secrets["gcp_service_account"]["textkey"])
             project_id = cred_dict.get("project_id")
-            # Explicitly pass project and database='(default)' to prevent URL encoding errors (%28default%29)
+            # Passing database=None prevents client SDK from encoding default db to '%28default%29'
             db = firestore.Client.from_service_account_info(
                 cred_dict, 
                 project=project_id,
-                database='(default)'
+                database=None
             )
         except Exception as e:
             st.sidebar.error(f"Firestore Auth Error: {e}")
