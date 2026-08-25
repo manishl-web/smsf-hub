@@ -44,7 +44,9 @@ def init_services():
     if "gcp_service_account" in st.secrets and "textkey" in st.secrets["gcp_service_account"]:
         try:
             cred_dict = json.loads(st.secrets["gcp_service_account"]["textkey"])
-            db = firestore.Client.from_service_account_info(cred_dict)
+            project_id = cred_dict.get("project_id")
+            # Explicitly set project_id to fix InvalidArgument RPC exception
+            db = firestore.Client.from_service_account_info(cred_dict, project=project_id)
         except Exception as e:
             st.sidebar.error(f"Firestore Auth Error: {e}")
 
@@ -62,13 +64,17 @@ def init_services():
 db, supabase = init_services()
 
 
-# ---------------- DATA FETCHERS ----------------
+# ---------------- DATA FETCHERS & HELPERS ----------------
 @st.cache_data(ttl=300)
 def fetch_reports():
     if not db:
         return []
-    docs = list(db.collection('type2_reports').stream())
-    return [d.to_dict() for d in docs]
+    try:
+        docs = list(db.collection('type2_reports').stream())
+        return [d.to_dict() for d in docs]
+    except Exception as e:
+        st.error(f"Error loading compliance reports: {e}")
+        return []
 
 @st.cache_data(ttl=300)
 def fetch_properties():
@@ -110,7 +116,7 @@ def robust_json_decode(text):
 st.sidebar.title("🛡️ Audit Portal")
 app_mode = st.sidebar.radio("Navigate", ["🔍 Search & Analytics Hub", "📤 AI & Database Admin Studio"])
 
-# Securely pull API Key from backend secrets
+# Pull Gemini API Key securely from secrets
 api_key = st.secrets.get("GEMINI_API_KEY", "")
 
 
@@ -428,7 +434,7 @@ elif app_mode == "📤 AI & Database Admin Studio":
                         if 'year' in df.columns:
                             df['year'] = df['year'].astype(str).str.strip()
 
-                        # Remove internal duplicates from CSV
+                        # Deduplicate internally before upload
                         initial_count = len(df)
                         df = df.drop_duplicates(subset=['entity_name', 'year'], keep='last')
                         deduped_count = len(df)
