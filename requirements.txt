@@ -1,5 +1,7 @@
 streamlit
-google-cloud-firestore
+google-cloud-firestore==2.14.0
+google-api-core==2.15.0
+requests
 google-genai
 pandas
 PyMuPDF
