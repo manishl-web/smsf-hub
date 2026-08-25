@@ -4,10 +4,12 @@ import re
 import time
 import tempfile
 import ast
+import requests
 import streamlit as st
 import pandas as pd
 import numpy as np
 import google.cloud.firestore as firestore
+import google.auth.transport.requests
 from google.oauth2 import service_account
 from google import genai
 from supabase import create_client
@@ -42,16 +44,20 @@ st.markdown("""
 @st.cache_resource(ttl=600)
 def init_services():
     db = None
+    cred_dict = None
     if "gcp_service_account" in st.secrets and "textkey" in st.secrets["gcp_service_account"]:
         try:
             cred_dict = json.loads(st.secrets["gcp_service_account"]["textkey"])
             project_id = cred_dict.get("project_id")
             
-            # Explicitly load OAuth2 credentials object to stop gRPC from encoding (default) into %28default%29
-            credentials = service_account.Credentials.from_service_account_info(cred_dict)
+            # Explicitly parse credentials with GCP cloud-platform scope
+            credentials = service_account.Credentials.from_service_account_info(
+                cred_dict,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
             db = firestore.Client(project=project_id, credentials=credentials)
         except Exception as e:
-            st.sidebar.error(f"Firestore Auth Error: {e}")
+            st.sidebar.error(f"Firestore Client Init Error: {e}")
 
     supabase = None
     sb_url = st.secrets.get("SUPABASE_URL", "")
@@ -62,23 +68,78 @@ def init_services():
         except Exception as e:
             st.sidebar.error(f"Supabase Auth Error: {e}")
 
-    return db, supabase
+    return db, supabase, cred_dict
 
-db, supabase = init_services()
+db, supabase, cred_dict = init_services()
+
+
+# ---------------- FIRESTORE REST HELPERS ----------------
+def parse_firestore_value(val_dict):
+    """Converts a Firestore REST API field object into a native Python object."""
+    if not isinstance(val_dict, dict):
+        return val_dict
+    if "stringValue" in val_dict:
+        return val_dict["stringValue"]
+    elif "integerValue" in val_dict:
+        return int(val_dict["integerValue"])
+    elif "doubleValue" in val_dict:
+        return float(val_dict["doubleValue"])
+    elif "booleanValue" in val_dict:
+        return val_dict["booleanValue"]
+    elif "timestampValue" in val_dict:
+        return val_dict["timestampValue"]
+    elif "arrayValue" in val_dict:
+        values = val_dict["arrayValue"].get("values", [])
+        return [parse_firestore_value(v) for v in values]
+    elif "mapValue" in val_dict:
+        fields = val_dict["mapValue"].get("fields", {})
+        return {k: parse_firestore_value(v) for k, v in fields.items()}
+    elif "nullValue" in val_dict:
+        return None
+    return next(iter(val_dict.values()), "") if val_dict else ""
 
 
 # ---------------- DATA FETCHERS & HELPERS ----------------
 @st.cache_data(ttl=300)
 def fetch_reports():
-    if not db:
-        return []
-    try:
-        # Standard collection query without URL encoding side-effects
-        docs = db.collection('type2_reports').get()
-        return [d.to_dict() for d in docs if d.exists]
-    except Exception as e:
-        st.error(f"Error loading compliance reports: {e}")
-        return []
+    # Attempt 1: Standard SDK fetch
+    if db:
+        try:
+            docs = db.collection('type2_reports').get()
+            return [d.to_dict() for d in docs if d.exists]
+        except Exception:
+            pass  # If SDK fails due to gRPC %28default%29 error, fallback to REST API below
+
+    # Attempt 2: Direct REST API Fallback (Bypasses gRPC library completely)
+    if cred_dict:
+        try:
+            project_id = cred_dict.get("project_id")
+            credentials = service_account.Credentials.from_service_account_info(
+                cred_dict,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
+            auth_req = google.auth.transport.requests.Request()
+            credentials.refresh(auth_req)
+            token = credentials.token
+            
+            url = f"https://firestore.googleapis.com/v1/projects/{project_id}/databases/(default)/documents/type2_reports"
+            headers = {"Authorization": f"Bearer {token}"}
+            
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                reports = []
+                for doc in data.get("documents", []):
+                    fields = doc.get("fields", {})
+                    parsed = {k: parse_firestore_value(v) for k, v in fields.items()}
+                    reports.append(parsed)
+                return reports
+            else:
+                st.error(f"REST Fetch Error ({resp.status_code}): {resp.text}")
+        except Exception as ex:
+            st.error(f"Error loading compliance reports: {ex}")
+            
+    return []
 
 @st.cache_data(ttl=300)
 def fetch_properties():
@@ -114,6 +175,47 @@ def robust_json_decode(text):
                 except Exception:
                     pass
     return None
+
+def save_report_metadata(metadata):
+    """Saves report metadata via SDK, falling back to REST POST if SDK fails."""
+    # SDK Attempt
+    if db:
+        try:
+            db.collection('type2_reports').add(metadata)
+            return True
+        except Exception:
+            pass
+
+    # REST Attempt
+    if cred_dict:
+        try:
+            project_id = cred_dict.get("project_id")
+            credentials = service_account.Credentials.from_service_account_info(
+                cred_dict,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
+            auth_req = google.auth.transport.requests.Request()
+            credentials.refresh(auth_req)
+            token = credentials.token
+            
+            url = f"https://firestore.googleapis.com/v1/projects/{project_id}/databases/(default)/documents/type2_reports"
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+            
+            fields_payload = {}
+            for k, v in metadata.items():
+                if isinstance(v, (int, float)):
+                    fields_payload[k] = {"doubleValue": float(v)}
+                elif isinstance(v, bool):
+                    fields_payload[k] = {"booleanValue": v}
+                else:
+                    fields_payload[k] = {"stringValue": str(v if v is not None else "")}
+            
+            resp = requests.post(url, headers=headers, json={"fields": fields_payload}, timeout=10)
+            return resp.status_code == 200
+        except Exception as e:
+            st.error(f"REST Write Error: {e}")
+            return False
+    return False
 
 
 # ---------------- NAVIGATION SIDEBAR ----------------
@@ -481,7 +583,7 @@ elif app_mode == "📤 AI & Database Admin Studio":
         if submit_btn and uploaded_files:
             if not api_key:
                 st.error("🔑 API Key missing from configuration (`st.secrets`). Please verify settings.")
-            elif not supabase or not db:
+            elif not supabase or (not db and not cred_dict):
                 st.error("⚠️ Database/Storage connections missing.")
             else:
                 client = genai.Client(api_key=api_key)
@@ -537,7 +639,7 @@ elif app_mode == "📤 AI & Database Admin Studio":
                                 metadata["download_url"] = pub_url
                                 metadata["created_at"] = time.time()
                                 
-                                db.collection('type2_reports').add(metadata)
+                                save_report_metadata(metadata)
                                 st.success(f"Indexed: `{file.name}` -> **{metadata.get('platform_name')}**")
                     except Exception as e:
                         st.error(f"Error handling {file.name}: {e}")
