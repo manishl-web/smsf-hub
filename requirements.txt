@@ -1,8 +1,9 @@
 streamlit
-google-cloud-firestore==2.14.0
-google-api-core==2.15.0
-requests
-google-genai
 pandas
-PyMuPDF
+numpy
+google-cloud-firestore
+google-auth
+google-genai
 supabase
+requests
+pypdf
