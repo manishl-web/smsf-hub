@@ -13,6 +13,7 @@ import google.auth.transport.requests
 from google.oauth2 import service_account
 from google import genai
 from supabase import create_client
+from pypdf import PdfReader
 
 # ---------------- PAGE CONFIG & STYLING ----------------
 st.set_page_config(
@@ -99,6 +100,17 @@ def parse_firestore_value(val_dict):
     return next(iter(val_dict.values()), "") if val_dict else ""
 
 
+# ---------------- PDF TEXT EXTRACTION HELPER ----------------
+def extract_pdf_content(file_path):
+    """Extracts raw text from PDF files for backfilling and multi-field indexing."""
+    try:
+        reader = PdfReader(file_path)
+        return " ".join([page.extract_text() or "" for page in reader.pages])
+    except Exception as e:
+        st.error(f"Extraction error: {e}")
+        return ""
+
+
 # ---------------- DATA FETCHERS & HELPERS ----------------
 @st.cache_data(ttl=300)
 def fetch_reports():
@@ -108,9 +120,9 @@ def fetch_reports():
             docs = db.collection('type2_reports').get()
             return [d.to_dict() for d in docs if d.exists]
         except Exception:
-            pass  # If SDK fails due to gRPC %28default%29 error, fallback to REST API below
+            pass  # Fallback to REST API below if SDK fails
 
-    # Attempt 2: Direct REST API Fallback (Bypasses gRPC library completely)
+    # Attempt 2: Direct REST API Fallback
     if cred_dict:
         try:
             project_id = cred_dict.get("project_id")
@@ -178,7 +190,6 @@ def robust_json_decode(text):
 
 def save_report_metadata(metadata):
     """Saves report metadata via SDK, falling back to REST POST if SDK fails."""
-    # SDK Attempt
     if db:
         try:
             db.collection('type2_reports').add(metadata)
@@ -186,7 +197,6 @@ def save_report_metadata(metadata):
         except Exception:
             pass
 
-    # REST Attempt
     if cred_dict:
         try:
             project_id = cred_dict.get("project_id")
@@ -252,7 +262,7 @@ if app_mode == "🔍 Search & Analytics Hub":
         st.write("")
         fcol1, fcol2, fcol3, fcol4 = st.columns([2, 1, 1, 1])
         with fcol1:
-            q = st.text_input("🔍 Keyword Search (Platform, Auditor, Exceptions)", "").strip().lower()
+            q = st.text_input("🔍 Keyword Search (Filename, Platform, Auditor, Content)", "").strip().lower()
         with fcol2:
             fy_options = ["All Years"] + [f"FY{year}" for year in range(2021, 2031)]
             fy_sel = st.selectbox("Financial Year", fy_options)
@@ -261,9 +271,10 @@ if app_mode == "🔍 Search & Analytics Hub":
         with fcol4:
             sort_order = st.selectbox("Sort Alphabetically", ["A-Z (Ascending)", "Z-A (Descending)"])
 
+        # Multi-field query filtering across original filename, display titles, extracted text, and platforms
         filtered = []
         for r in reports:
-            search_blob = f"{r.get('platform_name', '')} {r.get('auditing_firm', '')} {r.get('audit_opinion', '')} {r.get('key_exceptions_summary', '')}".lower()
+            search_blob = f"{r.get('platform_name', '')} {r.get('display_title', '')} {r.get('source_filename', '')} {r.get('original_filename', '')} {r.get('auditing_firm', '')} {r.get('audit_opinion', '')} {r.get('key_exceptions_summary', '')} {r.get('extracted_content', '')}".lower()
             matches_search = (q in search_blob) if q else True
             doc_fy = f"{r.get('aus_financial_year', '')} {r.get('financial_year', '')}".upper()
             matches_fy = True if fy_sel == "All Years" else (fy_sel.replace("FY", "") in doc_fy)
@@ -322,17 +333,25 @@ if app_mode == "🔍 Search & Analytics Hub":
             for d in doc_list:
                 role_tag = f"<b>[{d.get('doc_role', 'Control Report')}]</b> " if d.get('doc_role') else ""
                 date_range = f" ({d.get('date_coverage_period', '')})" if d.get('date_coverage_period') else ""
-                col_left, col_right = st.columns([4, 1])
+                col_left, col_mid, col_right = st.columns([3, 1, 1])
+                
+                filename_display = d.get('source_filename', d.get('original_filename', 'Report.pdf'))
+                view_target_url = d.get('view_url', d.get('download_url', '#'))
+                download_target_url = d.get('download_url', '#')
+
                 with col_left:
                     st.markdown(f"""
                     <div class="sub-doc-pill">
-                        📄 {role_tag}<strong>{d.get('source_filename', 'Report.pdf')}</strong>{date_range}<br/>
+                        📄 {role_tag}<strong>{filename_display}</strong>{date_range}<br/>
                         <span style="color:#475569;">Exceptions: {d.get('key_exceptions_summary', 'None flagged')}</span>
                     </div>
                     """, unsafe_allow_html=True)
+                with col_mid:
+                    if view_target_url != '#':
+                        st.link_button("👁️ View", view_target_url, use_container_width=True)
                 with col_right:
-                    if d.get('download_url'):
-                        st.link_button("📥 Download", d['download_url'])
+                    if download_target_url != '#':
+                        st.link_button("📥 Download", download_target_url, use_container_width=True)
             
             st.markdown("</div>", unsafe_allow_html=True)
 
@@ -600,10 +619,14 @@ elif app_mode == "📤 AI & Database Admin Studio":
                             tmp.write(raw_bytes)
                             tmp_path = tmp.name
 
+                        # Extract PDF raw text for full-text search indexing
+                        extracted_text = extract_pdf_content(tmp_path)
+
                         g_file = client.files.upload(file=tmp_path, config={"mime_type": "application/pdf"})
                         prompt = """
                         Analyze the internal text of this audit report carefully and extract details into JSON:
                         {
+                            "display_title": "Full Formal Display Title of Report",
                             "platform_name": "Primary Platform Name",
                             "document_type": "GS007 Report, SOC 1 Report, SOC 3 Report, or Bridge Letter",
                             "date_coverage_period": "e.g. 1 July 2022 - 30 June 2023",
@@ -628,19 +651,26 @@ elif app_mode == "📤 AI & Database Admin Studio":
                                 continue
 
                         if res and res.text:
-                            metadata = robust_json_decode(res.text)
-                            if metadata:
-                                safe_filename = file.name.replace(" ", "_")
-                                s_path = f"reports/{safe_filename}"
-                                supabase.storage.from_("pdfs").upload(s_path, raw_bytes, {"content-type": "application/pdf", "x-upsert": "true"})
-                                pub_url = supabase.storage.from_("pdfs").get_public_url(s_path)
-                                
-                                metadata["source_filename"] = file.name
-                                metadata["download_url"] = pub_url
-                                metadata["created_at"] = time.time()
-                                
-                                save_report_metadata(metadata)
-                                st.success(f"Indexed: `{file.name}` -> **{metadata.get('platform_name')}**")
+                            metadata = robust_json_decode(res.text) or {}
+                            safe_filename = file.name.replace(" ", "_")
+                            s_path = f"reports/{safe_filename}"
+                            
+                            # Upload to Supabase Bucket
+                            supabase.storage.from_("pdfs").upload(
+                                s_path, raw_bytes, {"content-type": "application/pdf", "x-upsert": "true"}
+                            )
+                            pub_url = supabase.storage.from_("pdfs").get_public_url(s_path)
+                            
+                            # Construct dual viewing/downloading action links
+                            metadata["source_filename"] = file.name
+                            metadata["original_filename"] = file.name
+                            metadata["extracted_content"] = extracted_text
+                            metadata["download_url"] = f"{pub_url}?download=true"
+                            metadata["view_url"] = pub_url
+                            metadata["created_at"] = time.time()
+                            
+                            save_report_metadata(metadata)
+                            st.success(f"Indexed: `{file.name}` -> **{metadata.get('platform_name', file.name)}**")
                     except Exception as e:
                         st.error(f"Error handling {file.name}: {e}")
                     finally:
